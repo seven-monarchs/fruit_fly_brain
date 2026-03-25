@@ -1,0 +1,13 @@
+name: brian2
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - brian2=2.5.1
+  - numpy=1.24
+  - jupyter
+  - ipykernel
+  - pandas
+  - joblib
+  - pyarrow

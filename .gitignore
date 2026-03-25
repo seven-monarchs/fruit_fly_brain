@@ -1,0 +1,27 @@
+# Virtual environments
+wenv*/
+venv*/
+env/
+.venv/
+*.venv
+.env3*/
+.env[0-9]*/
+
+# Environment variables
+.env
+.env.*
+*.env
+
+# Claude
+CLAUDE.md
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
