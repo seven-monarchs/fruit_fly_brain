@@ -16,6 +16,12 @@ env/
 CLAUDE.md
 .claude/
 
+# Logs
+logs/
+
+# Simulation outputs (videos too large for git — keep preview.gif for README)
+simulations/*.mp4
+
 # Python
 __pycache__/
 *.py[cod]

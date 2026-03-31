@@ -1,503 +1,685 @@
-# Simulation Cerveau-Corps de la Mouche — Documentation Technique
+# NeuroFly — Simulation Cerveau-Corps de *Drosophila melanogaster*
 
-## Vue d'ensemble
+Français 🇫🇷 | [English 🇬🇧](README.en.md)
 
-Ce projet couple un modèle de réseau de neurones à décharges biologiquement précis du cerveau de *Drosophila melanogaster* (la drosophile, ou mouche du vinaigre) à une simulation physique d'un corps. Le modèle cérébral pilote le corps en temps réel : l'activité neuronale dans le cerveau détermine la vitesse et la direction de marche de la mouche.
+![Aperçu de la simulation](simulations/preview.gif)
 
-**En termes simples :** on simule 138 639 neurones qui s'activent et communiquent entre eux, puis on utilise la sortie de cette simulation pour piloter un modèle physique 3D du corps d'une mouche.
+Une simulation en boucle fermée de *Drosophila melanogaster* (drosophile) qui couple un réseau de neurones à décharges biologiquement précis à un corps physique 3D. L'activité neuronale issue du vrai connectome de la mouche pilote la locomotion, la navigation olfactive et le comportement alimentaire — le tout visualisé dans une vidéo split-screen.
+
+Le cerveau et le corps partagent une **chronologie continue unique** (pas de boucle, pas de répétition). Le cerveau tourne exactement aussi longtemps que la simulation physique — 10 secondes réelles.
+
+> **Note** : projet personnel réalisé par un développeur logiciel solo, sans formation en neuroscience. Les choix de modélisation s'appuient sur des articles publiés et des outils open source existants (FlyWire, Brian2, NeuroMechFly) — toute erreur d'interprétation biologique est la mienne.
 
 ---
 
 ## Table des matières
 
-1. [Structure du dépôt](#structure-du-dépôt)
-2. [Comment exécuter](#comment-exécuter)
-3. [Glossaire biologique](#glossaire-biologique)
-4. [Le pipeline complet, étape par étape](#le-pipeline-complet-étape-par-étape)
-5. [Approfondissement du modèle cérébral](#approfondissement-du-modèle-cérébral)
-6. [Approfondissement du modèle corporel](#approfondissement-du-modèle-corporel)
-7. [Interface cerveau-corps](#interface-cerveau-corps)
-8. [Paramètres de configuration](#paramètres-de-configuration)
-9. [Fichiers de données](#fichiers-de-données)
-10. [Dépendances](#dépendances)
-11. [Limitations connues et décisions de conception](#limitations-connues-et-décisions-de-conception)
-12. [Historique des versions](#historique-des-versions)
+1. [Description](#description)
+2. [Sortie vidéo](#sortie-vidéo)
+3. [Installation](#installation)
+4. [Exécution](#exécution)
+5. [Architecture et pipeline](#architecture-et-pipeline)
+6. [Le modèle cérébral — Brian2 LIF](#le-modèle-cérébral--brian2-lif)
+7. [Le modèle corporel — NeuroMechFly](#le-modèle-corporel--neuromechfly)
+8. [Interface cerveau-corps](#interface-cerveau-corps)
+9. [Visualisation cérébrale](#visualisation-cérébrale)
+10. [Comportement de navigation et d'alimentation](#comportement-de-navigation-et-dalimentation)
+11. [Paramètres clés](#paramètres-clés)
+12. [Structure du dépôt](#structure-du-dépôt)
+13. [Dépendances](#dépendances)
+14. [Base scientifique](#base-scientifique)
+15. [Limitations et perspectives](#limitations-et-perspectives)
 
 ---
 
-## Structure du dépôt
+## Description
 
-```
-fly_brain_simulation/
-├── brain_body_simulation.py   # v1 : corps flybody, allure tripode codée à la main
-├── brain_body_v2.py           # v2 : corps flygym, allure CPG, OdorArena  ← PRINCIPAL
-├── main.py                    # Démo d'animation des ailes (standalone)
-├── walking_ani.py             # Démo de marche avec politique aléatoire (standalone)
-├── set_token.py               # Configuration du jeton API FlyWire
-├── .env                       # Config du renderer MuJoCo (MUJOCO_GL=egl)
-├── brain_model/
-│   ├── model.py               # Constructeur du réseau LIF Brian2
-│   ├── utils.py               # Outils d'analyse des trains de décharges
-│   ├── Completeness_783.csv   # Index neuronal : 138 639 neurones (FlyWire v783)
-│   ├── Connectivity_783.parquet  # Table des synapses : ~50 millions de connexions
-│   ├── flywire_annotations.tsv   # Étiquettes de types cellulaires pour tous les neurones
-│   └── descending_neurons.csv    # 1 299 neurones de sortie motrice avec étiquettes latérales
-└── simulations/
-    └── v*.mp4                 # Vidéos de sortie versionnées
-```
+Ce projet simule trois niveaux biologiques simultanément et les fait interagir en temps réel :
+
+**1. Cerveau — réseau LIF sur connectome réel**
+138 639 neurones de type Leaky Integrate-and-Fire (LIF) sont instanciés à partir du connectome FlyWire v783. Les connexions synaptiques (~50 millions) proviennent directement des données de microscopie électronique. Les neurones ascendants (1 736 neurones, signal proprioceptif simulé) sont stimulés à 150 Hz via un processus de Poisson, propageant l'activité à travers tout le graphe synaptique pendant 10 secondes continues.
+
+**2. Corps — simulation physique MuJoCo**
+Un modèle 3D fidèle de *Drosophila* avec 87 degrés de liberté, 6 pattes, coussinets adhésifs, 4 capteurs olfactifs (antennes + palpes maxillaires), et un corps mocap pour le proboscis. Le fly navigue vers une source de nourriture, s'arrête pour se nourrir, puis reprend sa marche.
+
+**3. Boucle fermée complète**
+Les neurones descendants (DN) du cerveau fournissent un biais gauche/droite qui module le virage de la mouche. En retour, la cinématique des pattes issues de la simulation physique est encodée à chaque pas de 25 ms en taux de décharge des neurones ascendants — le cerveau "entend" réellement si la mouche marche ou s'arrête. Le signal d'odeur des capteurs physiques module la visibilité des neurones olfactifs, et l'état d'alimentation active la couche SEZ.
 
 ---
 
-## Comment exécuter
+## Sortie vidéo
 
-```bash
-# Activer l'environnement virtuel
-# Windows :
+```text
+simulations/vN_brain_body_v4.mp4
+```
+
+Disposition (1280 × ~840 px) :
+
+```text
+┌─────────────────────────────────────────────────┐  480 px
+│           panneau d'activité cérébrale          │
+│  cyan = spikes LIF   vert = DN (locomotion)     │
+│  rose = olfactif     orange = SEZ (alimentation)│
+│  [état : "walking" / "odor detected" / "feeding"]│
+├──────────────────────┬──────────────────────────┤
+│   vue isométrique    │     vue du dessus        │  ~360 px
+│  (camera_top_right)  │  (camera_top_zoomout)   │
+└──────────────────────┴──────────────────────────┘
+   640 px                  640 px
+```
+
+La vidéo tourne à **0,25× la vitesse réelle** — 10 s de physique = 40 s de vidéo.
+
+---
+
+## Installation
+
+### Prérequis système
+
+- Windows 10 / 11 (64-bit)
+- **Python 3.10** — requis exactement (flygym et Brian2 ont été validés sur 3.10)
+  Télécharger : [python.org/downloads](https://www.python.org/downloads/release/python-31011/)
+- **ffmpeg** — requis pour l'encodage vidéo
+  Télécharger : [ffmpeg.org/download.html](https://ffmpeg.org/download.html) → ajouter au PATH
+
+### Créer l'environnement virtuel
+
+Ouvrir une invite de commandes dans le dossier du projet :
+
+```bat
+REM Créer le venv avec Python 3.10 spécifiquement
+py -3.10 -m venv wenv310
+
+REM Activer le venv
 wenv310\Scripts\activate
 
-# Lancer la simulation principale (génère un nouveau .mp4 versionné dans simulations/)
-python brain_body_v2.py
-
-# Lancer l'ancienne simulation v1 (flybody, allure tripode)
-python brain_body_simulation.py
+REM Mettre à jour pip
+python -m pip install --upgrade pip
 ```
 
-> **Important sous Windows :** `flygym` / `dm_control` doit être importé **avant** l'appel à `load_dotenv()`. Le fichier `.env` définit `MUJOCO_GL=egl`, un renderer GPU spécifique à Linux. S'il est chargé en premier, l'import échoue. L'ordre des imports dans les scripts est intentionnel — ne pas le modifier.
+### Installer les dépendances
+
+```bat
+pip install -r requirements.txt
+```
+
+> **Note** : `flybody` s'installe depuis GitHub — git doit être installé et accessible dans le PATH.
+> Télécharger git : [git-scm.com](https://git-scm.com/download/win)
+
+### Configurer le backend C++ pour Brian2 (optionnel mais fortement recommandé — ×10 plus rapide)
+
+Sans compilateur, la simulation tourne quand même via le backend numpy — `run.bat` bascule automatiquement. Avec le compilateur C++, le run Brian2 passe de ~50 min à ~5 min.
+
+#### Étape 1 — Installer Visual Studio 2022
+
+Télécharger **Visual Studio 2022 Community** (gratuit) :
+[visualstudio.microsoft.com/downloads](https://visualstudio.microsoft.com/downloads/)
+
+Lors de l'installation, cocher la charge de travail :
+**"Développement Desktop en C++"** (Desktop development with C++)
+
+> Les **Build Tools** seuls suffisent si vous ne voulez pas l'IDE complet :
+> [Télécharger Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+
+#### Étape 2 — Tester le compilateur
+
+Ouvrir une **nouvelle** invite de commandes (pas PowerShell) et taper :
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+cl.exe
+```
+
+Résultat attendu (succès) :
+
+```text
+Microsoft (R) C/C++ Optimizing Compiler Version 19.xx...
+```
+
+Si vous obtenez `'cl' is not recognized` : vcvarsall.bat n'a pas été appelé, ou le composant C++ n'est pas installé.
+
+#### Étape 3 — Tester Brian2 avec le backend C++
+
+```bat
+wenv310\Scripts\activate
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+python -c "from brian2 import *; G = NeuronGroup(1, 'dv/dt = -v/ms : 1'); net = Network(G); net.run(1*ms); print('SUCCESS C++ BACKEND')"
+```
+
+Si Brian2 compile avec Cython (premier run ~30 s) et affiche `SUCCESS C++ BACKEND`, le compilateur est opérationnel. `run.bat` le détectera automatiquement à chaque lancement.
 
 ---
 
-## Glossaire biologique
+## Exécution
 
-Comprendre ce projet nécessite quelques notions de neurosciences et d'entomologie. Tous les termes sont définis ici dans un langage accessible aux développeurs.
+**Méthode recommandée — utiliser le script de lancement** (configure automatiquement le compilateur C++) :
 
-### Drosophila melanogaster
-La drosophile, ou mouche du vinaigre. Organisme modèle en biologie — son système nerveux est suffisamment petit pour être entièrement cartographié (~140 000 neurones) mais assez complexe pour produire de vrais comportements : marche, vol, toilettage, navigation olfactive. C'est le "Hello World" de la neurosciences.
-
-### Connectome
-Une carte complète de chaque neurone et de chaque synapse (connexion entre neurones) dans un système nerveux. Le connectome de la drosophile a été assemblé à partir d'images de microscopie électronique par le projet FlyWire. La version 783 (utilisée ici) contient **138 639 neurones** et environ **50 millions de synapses**. C'est l'équivalent d'un schéma de câblage complet du cerveau.
-
-### Neurone
-L'unité computationnelle de base du système nerveux. Reçoit des entrées électriques, les intègre, et génère une décharge de sortie si l'entrée intégrée dépasse un seuil. Modélisé ici comme une unité **Leaky Integrate-and-Fire (LIF)** (voir ci-dessous).
-
-### Synapse
-Une connexion d'un neurone à un autre. Chaque synapse a un **poids** (force) et un **signe** (excitatrice = active la cible, inhibitrice = la supprime). Dans les données du connectome, le signe est encodé par `Excitatory x Connectivity` — les valeurs positives sont excitatrices, les négatives inhibitrices.
-
-### Décharge / Potentiel d'action
-Un neurone "s'active" quand sa tension membranaire dépasse un seuil, produisant une brève impulsion électrique appelée décharge (spike). Toutes les informations dans les réseaux neuronaux biologiques sont encodées comme des séquences de ces événements discrets (trains de décharges). Pensez-y comme un signal numérique 1 bit.
-
-### Train de décharges (Spike Train)
-La séquence d'horodatages auxquels un neurone a tiré pendant une simulation. Dans Brian2, `spike_monitor.spike_trains()` renvoie un dictionnaire `{id_neurone: tableau_des_temps_de_décharge}`.
-
-### Modèle Leaky Integrate-and-Fire (LIF)
-Un modèle mathématique simplifié d'un neurone. La tension membranaire `v` retourne vers un potentiel de repos `v_0` avec le temps (comme un condensateur qui se décharge), mais intègre les décharges entrantes via une variable de conductance `g`. Quand `v` dépasse le seuil `v_th`, le neurone s'active et se réinitialise.
-
-Les équations (tirées de `brain_model/model.py`) :
+```bat
+run.bat
 ```
-dv/dt = (v_0 - v + g) / t_mbr   [dynamique membranaire]
+
+Ou manuellement depuis une invite de commandes avec l'environnement VS :
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+wenv310\Scripts\python.exe fly_brain_body_simulation.py
+```
+
+**Durée estimée : ~2h30–3h** avec le backend C++ (cache chaud). Le premier lancement absolu ajoute ~13 min de compilation C++ (Brian2 compile ~50M synapses en Cython/C++ — une seule fois, puis mis en cache).
+
+Coût mesuré par pas (machine de référence, 138k neurones, 50M synapses) :
+
+| Étape | Temps par pas | Total (400 pas) |
+| --- | --- | --- |
+| `net.run(25ms)` Brian2 | ~20–30 s | ~130–180 min |
+| Physique MuJoCo + rendu | ~0,5 s | ~3 min |
+| Calcul glow + rendu cerveau | — (après boucle) | ~10 min |
+| Écriture vidéo | — | ~2 min |
+| **TOTAL** | | **~2h30–3h** |
+
+Le log de progression en temps réel est écrit dans `logs/YYYY-MM-DD_HH-MM-SS_run.log` (stdout + stderr) :
+
+```text
+  step 000/400  t=0.00s  [walk]  proprio=0ms  brian=24557ms  physics=9320ms  step_total=33879ms  asc=22Hz  DN L51/R49 lr=+0.02  dist=21.6mm  ETA=225.3min
+  step 010/400  t=0.25s  [walk]  proprio=0ms  brian=17696ms  physics=446ms   step_total=18142ms  asc=150Hz  DN L254/R248 lr=+0.01  dist=21.1mm  ETA=150.0min
+  FEEDING START  t=2.30s  dist=1.18mm
+  step 090/400  t=2.25s  [walk]  proprio=0ms  brian=21197ms  physics=521ms   step_total=21722ms  asc=150Hz  DN L264/R267 lr=-0.01  dist=1.6mm   ETA=122.0min
+```
+
+**Prérequis** : Visual Studio 2022 Community avec la charge de travail "Développement Desktop en C++". Le script `run.bat` appelle `vcvarsall.bat x64` avant Python — requis pour que Brian2 trouve `cl.exe`. Sans cela, Brian2 revient silencieusement au backend numpy (~10× plus lent).
+
+Pour revenir au backend numpy (sans compilateur), décommenter dans `fly_brain_body_simulation.py` :
+
+```python
+# from brian2 import prefs; prefs.codegen.target = "numpy"
+```
+
+> **Note Windows** : `flygym` / `dm_control` doit être importé **avant** `load_dotenv()`. Le `.env` définit `MUJOCO_GL=egl` (renderer GPU Linux). S'il est chargé en premier sous Windows, l'import échoue. L'ordre des imports dans le script est intentionnel.
+
+---
+
+## Architecture et pipeline
+
+```text
+[Données connectome FlyWire v783]
+        │
+        ▼
+[1. Chargement — 138 639 neurones + annotations]
+   Completeness_783.csv → index Brian2
+   flywire_annotations.tsv → types cellulaires, positions soma
+        │
+        ▼
+[2. Extraction des groupes de neurones]
+   Avant tout filtrage de coordonnées soma :
+   - ascending (1 736)  → stimulation Poisson @ 150 Hz
+   - olfactory ORN/PN (2 279) → couche rose, alpha ∝ odeur
+   - SEZ/feeding (408)  → couche orange, alpha ∝ alimentation
+   - DNs (1 299)        → couche verte + readout moteur
+        │
+        ▼
+[3. Run Brian2 LIF — 10 000 ms continus]
+   138 639 neurones LIF, ~50M synapses, backend C++ (défaut)
+   Ascending @ 150 Hz + olfactory/SEZ @ 80 Hz (deux groupes Poisson distincts)
+   ~15 000–20 000 neurones s'activent au moins une fois
+        │
+        ▼
+[4. Pré-calcul des frames de glow]
+   300 frames @ 30 fps, décroissance exp. τ=80 ms
+   frame_glows[300, 118 078] — normalisé [0, 1]
+        │
+        ▼
+[5. Construction de la simulation flygym]
+   OdorArena (nourriture à [18,12,0] mm, intensité=500)
+   Fly spawn (0,0,0.2) orienté à ~70° de la nourriture
+   2 caméras : isométrique + vue du dessus
+   Corps mocap proboscis (capsule bleue)
+        │
+        ▼
+[6. Boucle physique — 400 décisions × 250 microsteps]
+   Chaque décision (25 ms) :
+     obs["odor_intensity"] → biais de virage primaire
+     lr_diff[t] des DNs → modulation cérébrale (×0.15)
+     dist < 1.2 mm → alimentation (probe extend→eat→retract)
+        │
+        ▼
+[7. Rendu des panneaux cérébraux — 1 200 frames]
+   5 couches scatter empilées par frame :
+     fond navy → activité LIF → DN vert → olfactif rose → SEZ orange
+        │
+        ▼
+[8. Assemblage et encodage vidéo]
+   Rangée du haut : panneau cerveau (1280×480)
+   Rangée du bas : vue iso + vue top (640×H chacune)
+   h264, CRF 18, yuv420p
+```
+
+---
+
+## Le modèle cérébral — Brian2 LIF
+
+### Source des données
+
+Le connectome FlyWire v783 contient la carte complète de chaque neurone et synapse du cerveau adulte de *Drosophila melanogaster*, assemblée par microscopie électronique en transmission (TEM) par le projet FlyWire (Princeton, Janelia, UCL). Version 783 = 138 639 neurones, ~50 millions de synapses.
+
+### Modèle neuronal Leaky Integrate-and-Fire
+
+Chaque neurone est modélisé par deux équations différentielles :
+
+```text
+dv/dt = (v_0 - v + g) / t_mbr   [dynamique membranaire — "fuite" vers le repos]
 dg/dt = -g / tau                  [décroissance de la conductance synaptique]
 ```
 
-Où :
-- `v_0 = -52 mV` — potentiel de repos (tension au repos sans entrée)
-- `v_th = -45 mV` — seuil (s'active quand v dépasse cette valeur)
-- `v_rst = -52 mV` — potentiel de réinitialisation (après activation, v revient ici)
-- `t_mbr = 20 ms` — constante de temps membranaire (vitesse de fuite vers le repos)
-- `tau = 5 ms` — constante de temps synaptique (vitesse de décroissance d'un spike reçu)
-- `t_rfc = 2,2 ms` — période réfractaire (durée minimale entre deux décharges ; le neurone est "sourd" aux entrées pendant cette fenêtre)
+Quand `v` dépasse `v_th`, le neurone émet un spike et se réinitialise à `v_rst` pour une période réfractaire `t_rfc`.
 
-### Entrée de Poisson (Poisson Input)
-Une façon de modéliser une stimulation externe. Un **processus de Poisson** génère des événements de décharge aléatoires à un taux moyen fixe (ex. : 150 Hz = 150 décharges/seconde en moyenne). Chaque décharge entrante ajoute de la tension à la variable `g` du neurone cible. Cela simule un neurone recevant une entrée bruitée mais soutenue de l'extérieur du réseau modélisé.
+### Paramètres LIF
 
-### Neurones ascendants
-Neurones qui transportent des signaux **du corps vers le cerveau**. Chez la mouche, ils courent physiquement depuis le **Cordon Nerveux Ventral (VNC)** — l'équivalent de la moelle épinière chez la mouche — jusqu'au cerveau. Ils transportent des informations proprioceptives (position des pattes, vitesse de déplacement). Nous stimulons 1 736 de ces neurones comme entrée sensorielle, simulant le signal "les pattes bougent".
-
-> **Pourquoi les neurones ascendants ?** L'analyse de la connectivité montre qu'ils établissent 646 synapses directes sur des neurones descendants liés à la locomotion — bien plus que tout autre type sensoriel. Les stimuler active le plus efficacement le circuit de locomotion.
-
-### Neurones descendants (DNs — Descending Neurons)
-Neurones qui transportent des signaux **du cerveau vers le corps**. Ils constituent le seul voie physique entre le cerveau et le système moteur. Chez la mouche, il y a ~1 299 DNs annotés. Ce sont les sorties du cerveau — les "commandes motrices". Nous enregistrons leur activité et l'utilisons pour piloter le corps physique.
-
-DNs notables utilisés pour une cartographie biologiquement fondée :
-- **DNa01 / DNa02** — contrôle des pattes avant, initiation et direction de la marche
-- **MDN (Moon-walking DN)** — déclenche la marche arrière
-- **DNg02** — coordination des pattes médianes et postérieures
-- **DNp09 / DNp10** — contrôle des pattes postérieures
-
-### Cordon Nerveux Ventral (VNC — Ventral Nerve Cord)
-La "moelle épinière" de la mouche. Situé sous le cerveau, il contient les circuits **Générateurs de Rythmes Centraux (CPG)** qui produisent les mouvements rythmiques des pattes. C'est la pièce manquante de notre simulation — nous le contournons en utilisant le CPGNetwork intégré de flygym. Connecter le vrai VNC du connectome reste un problème de recherche ouvert majeur.
-
-### Générateur de Rythmes Centraux (CPG — Central Pattern Generator)
-Un circuit neural qui produit une sortie rythmique sans entrée rythmique. Les CPG existent chez tous les animaux et sont responsables de la marche, de la nage, de la respiration, etc. Ils n'ont pas besoin de retour sensoriel pour fonctionner — ils oscillent d'eux-mêmes. Dans flygym, le CPG est implémenté comme 6 oscillateurs couplés (un par patte) avec des relations de phase qui produisent une allure tripode.
-
-### Allure tripode (Tripod Gait)
-Le schéma de marche utilisé par les mouches et de nombreux autres insectes. Les six pattes sont divisées en deux groupes de trois :
-- **Tripode A (phase de balancement) :** avant-droite, milieu-gauche, arrière-droite se soulèvent simultanément
-- **Tripode B (phase d'appui) :** avant-gauche, milieu-droite, arrière-gauche restent au sol
-
-Les deux tripodes alternent — pendant que A est en l'air, B soutient le corps, et vice versa. Cela maintient toujours au moins 3 pieds au sol, offrant un support stable. C'est l'équivalent insecte du trot diagonal chez les quadrupèdes.
-
-### Proprioception
-La sensation de position de ses propres membres dans l'espace. Dans le contexte de la mouche : les pattes envoient des signaux au cerveau signalant leur position et la force exercée. Les neurones ascendants transportent cette information. On la modélise en stimulant ces neurones ascendants avec des entrées de Poisson.
-
-### Olfaction / Taxis olfactif
-Le sens de l'odorat. Le **taxis olfactif** est la navigation guidée par des gradients d'odeurs — se déplacer vers les odeurs attrayantes, s'éloigner des odeurs aversives. La mouche détecte les odeurs via ses antennes et ses palpes maxillaires. Dans l'`OdorArena`, la concentration d'odeur suit une loi en inverse du carré (`C ∝ 1/r²`). Les 4 capteurs olfactifs de la mouche (2 antennes + 2 palpes maxillaires) lisent chacun la concentration locale. L'asymétrie gauche/droite des capteurs peut guider les virages — c'est la base biologique de la navigation olfactive.
-
-Dans notre simulation : la source d'odeur existe dans l'arène mais le modèle cérébral ne la lit pas encore. C'est l'infrastructure pour une intégration future.
-
-### Potentiel membranaire
-La tension électrique à travers la membrane cellulaire d'un neurone. Mesuré en millivolts (mV). Au repos : ~-52 mV. Seuil d'activation : ~-45 mV. Après activation, réinitialisation à : ~-52 mV.
-
----
-
-## Le pipeline complet, étape par étape
-
-```
-[Données du Connectome FlyWire]
-        │
-        ▼
-[1. Construction du réseau LIF Brian2]
-   138 639 neurones, ~50M synapses
-        │
-        ▼
-[2. Stimulation des neurones ascendants]
-   1 736 neurones, Poisson @ 150 Hz
-   (simule le signal "les pattes bougent" du corps vers le cerveau)
-        │
-        ▼
-[3. Simulation cérébrale — 1000 ms]
-   ~15 000 neurones s'activent au moins une fois
-        │
-        ▼
-[4. Enregistrement des décharges des neurones descendants]
-   645 DNs gauches + 646 DNs droits + 8 DNs bilatéraux
-        │
-        ▼
-[5. Discrétisation des trains de décharges — fenêtres de 25 ms]
-   left_rate[40], right_rate[40], both_rate[40]
-        │
-        ▼
-[6. Calcul du signal de contrôle]
-   total_amp → vitesse avant
-   asymétrie gauche vs droite → biais de virage
-   → control_signals[40, 2]
-        │
-        ▼
-[7. Répétition du signal sur 3,75 s]
-   ctrl_tiled[150, 2] (signal cérébral répété ~3,75×)
-        │
-        ▼
-[8. Avancement de la physique flygym — 37 500 pas]
-   HybridTurningController + CPGNetwork + OdorArena
-        │
-        ▼
-[9. Capture et sauvegarde de la vidéo]
-   YawOnlyCamera → vN_brain_body_flygym_odor.mp4
-```
-
----
-
-## Approfondissement du modèle cérébral
-
-### Source
-Basé sur [philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model), qui implémente le réseau de :
-> Shiu et al. (2023). A leaky integrate-and-fire computational model based on the connectome of the entire adult Drosophila brain reveals insights into sensorimotor processing. *PLOS Computational Biology.*
-
-### Modèle neuronal (`brain_model/model.py`)
-
-```python
-eqs = '''
-    dv/dt = (v_0 - v + g) / t_mbr : volt (unless refractory)
-    dg/dt = -g / tau               : volt (unless refractory)
-    rfc                            : second
-'''
-```
-
-Paramètres (de `default_params`) :
-
-| Paramètre | Valeur | Signification |
-|-----------|--------|---------------|
-| `v_0` | -52 mV | Potentiel de repos |
-| `v_rst` | -52 mV | Tension de réinitialisation post-décharge |
-| `v_th` | -45 mV | Seuil de décharge |
-| `t_mbr` | 20 ms | Constante de temps membranaire |
+| Paramètre | Valeur | Signification biologique |
+| --- | --- | --- |
+| `v_0` | -52 mV | Potentiel de repos (sans entrée, la tension revient ici) |
+| `v_th` | -45 mV | Seuil de décharge (+7 mV au-dessus du repos) |
+| `v_rst` | -52 mV | Réinitialisation post-spike |
+| `t_mbr` | 20 ms | Constante de temps membranaire (vitesse de fuite) |
 | `tau` | 5 ms | Décroissance de la conductance synaptique |
-| `t_rfc` | 2,2 ms | Période réfractaire |
-| `t_dly` | 1,8 ms | Délai de transmission synaptique |
-| `w_syn` | 0,275 mV | Poids par synapse |
-| `r_poi` | 150 Hz | Taux de stimulation Poisson |
-| `f_poi` | 250 | Facteur d'échelle du poids Poisson |
+| `t_rfc` | 2.2 ms | Période réfractaire (durée minimale entre deux spikes) |
+| `t_dly` | 1.8 ms | Délai de transmission synaptique |
+| `w_syn` | 0.275 mV | Poids par synapse (contribution d'un spike entrant) |
+| `r_poi` | 150 Hz | Taux de stimulation Poisson des neurones ascendants |
+| `r_poi2` | 80 Hz | Taux de stimulation des neurones olfactifs (ORN/PN) et SEZ |
 
-### Connectivité (`Connectivity_783.parquet`)
+### Connectivité synaptique
 
-Chaque ligne est une synapse :
+Chaque synapse dans `Connectivity_783.parquet` a un signe encodé dans la colonne `Excitatory x Connectivity` :
 
-| Colonne | Description |
-|---------|-------------|
-| `Presynaptic_Index` | Index Brian2 du neurone émetteur |
-| `Postsynaptic_Index` | Index Brian2 du neurone récepteur |
-| `Excitatory x Connectivity` | Force signée : positif = excitatrice, négatif = inhibitrice |
+- **Positif** → synapse excitatrice (augmente `g`, rapproche `v` du seuil)
+- **Négatif** → synapse inhibitrice (diminue `g`, éloigne `v` du seuil)
 
-Le poids synaptique dans Brian2 est : `w = (Excitatory x Connectivity) × w_syn`
+Le poids effectif dans Brian2 : `w = (Excitatory x Connectivity) × w_syn`
 
-### Pourquoi le backend numpy ?
+### Choix des neurones stimulés
+
+Les **neurones ascendants** sont choisis comme entrée car ils constituent le canal proprioceptif principal — ils transportent le signal "les pattes bougent" du corps vers le cerveau. L'analyse de connectivité montre qu'ils établissent 646 synapses directes sur des DNs de locomotion, atteignant 28 DNs distincts — bien plus que tout autre type sensoriel (neurones de l'organe de Johnston : 41 synapses sur 3 DNs seulement).
+
+Leur taux de décharge est **dynamique** : à chaque fenêtre de 25 ms, la vitesse angulaire des pattes est calculée depuis `obs["joints"]` et encodée en taux Poisson entre `PROPRIO_MIN × 150 Hz` (immobilité) et `150 Hz` (marche rapide). Le cerveau reçoit ainsi un signal qui reflète l'état locomoteur réel de la mouche à chaque instant.
+
+### Backend C++ (défaut)
+
+Brian2 compile automatiquement les équations LIF vers C++ via Cython — **10× plus rapide** que le backend numpy pur Python. Sous Windows, cela requiert Visual Studio 2022 avec "Desktop development with C++" et l'environnement MSVC initialisé (`vcvarsall.bat x64`) avant le lancement de Python. Le script `run.bat` s'en charge automatiquement.
+
+En cas de besoin, le backend numpy reste disponible :
+
 ```python
-prefs.codegen.target = "numpy"
+from brian2 import prefs; prefs.codegen.target = "numpy"
 ```
-Brian2 compile par défaut vers C++ via Cython pour la vitesse. Cela nécessite un compilateur C++ (Visual Studio sous Windows). Pour éviter cette dépendance, on force le backend numpy pur Python. Il est ~10× plus lent mais ne nécessite aucun compilateur.
 
-### Choix des neurones sensoriels
+Note : cette ligne doit être placée **avant toute création d'objet Brian2**.
 
-Nous stimulons les **neurones ascendants** plutôt que les neurones sensoriels (olfactifs, visuels, etc.) parce que :
-1. Ils établissent 646 synapses directes sur des DNs de locomotion, atteignant 28 d'entre eux
-2. C'est bien plus que tout autre type sensoriel (neurones de l'organe de Johnston : 41 synapses, seulement 3 DNs)
-3. Biologiquement, cela simule le retour proprioceptif des pattes en mouvement — une boucle auto-entretenue
+### Positions soma pour la visualisation
+
+Les neurones sont affichés à leurs coordonnées anatomiques réelles :
+
+- Axes utilisés : `soma_x` (gauche-droite) vs `soma_y` inversé (dorsal-ventral)
+- `soma_z` est l'axe de profondeur en 40 nm/vox — trop plat pour servir d'axe vertical
+- Les neurones sans `soma_x/y` (olfactifs, SEZ) utilisent `pos_x/y` (centroïde cellulaire) comme fallback — couverture 100%
 
 ---
 
-## Approfondissement du modèle corporel
+## Le modèle corporel — NeuroMechFly
 
-### Source
-[NeuroMechFly v2](https://neuromechfly.org/) (bibliothèque flygym), issu de :
-> Lobato-Rios et al. (2023). NeuroMechFly 2.0, a framework for simulating embodied sensorimotor control in adult Drosophila. *Nature Methods.*
-
-### Moteur physique
-[MuJoCo](https://mujoco.org/) via [dm_control](https://github.com/google-deepmind/dm_control). MuJoCo signifie **Multi-Joint dynamics with Contact** (dynamique multi-articulaire avec contact). C'est un simulateur physique haute performance développé par DeepMind, standard en robotique et biomécanique.
-
-### Spécifications du modèle de mouche
+### Spécifications du modèle MuJoCo
 
 | Propriété | Valeur |
-|-----------|--------|
-| Degrés de liberté | 87 articulations |
+| --- | --- |
+| Degrés de liberté totaux | 87 articulations |
 | Articulations par patte | 7 (Coxa, Coxa_roll, Coxa_yaw, Femur, Femur_roll, Tibia, Tarsus1) |
-| Articulations de pattes totales | 42 (6 pattes × 7 DOF) |
-| Coussinets adhésifs | Activés (empêche les pieds de glisser) |
-| Capteurs olfactifs | Activés (antennes + palpes maxillaires, 4 capteurs au total) |
-| Pas de temps physique | 0,1 ms (1e-4 s) |
-| Gravité | -9810 mm/s² (gravité standard, modèle en mm) |
-
-### Convention de nommage des articulations
-
-Les pattes sont nommées par position et côté :
-- `LF` = Avant Gauche, `LM` = Milieu Gauche, `LH` = Arrière Gauche
-- `RF` = Avant Droit, `RM` = Milieu Droit, `RH` = Arrière Droit
-
-Exemple : `LFFemur` = patte avant gauche, articulation du fémur.
-
-L'ordre complet des DOF de pattes (42 valeurs dans le vecteur d'action) :
-```
-LF: LFCoxa, LFCoxa_roll, LFCoxa_yaw, LFFemur, LFFemur_roll, LFTibia, LFTarsus1
-LM: LMCoxa, ...
-LH: LHCoxa, ...
-RF: RFCoxa, ...
-RM: RMCoxa, ...
-RH: RHCoxa, ...
-```
+| Articulations de pattes | 42 (6 pattes × 7 DOF) |
+| Capteurs olfactifs | 4 (antenne gauche/droite + palpe gauche/droite) |
+| Coussinets adhésifs | Activés |
+| Pas de temps physique | 0.1 ms (1e-4 s) |
+| Gravité | -9810 mm/s² |
 
 ### HybridTurningController
 
-La classe contrôleur principale. Hérite de `SingleFlySimulation` (un environnement compatible Gymnasium). Reçoit un signal de contrôle 2D à chaque pas :
+Le contrôleur principal reçoit un signal 2D à chaque pas de 25 ms :
 
 ```python
-obs, reward, terminated, truncated, info = sim.step(control_signal)
-# control_signal: np.array([amplitude_gauche, amplitude_droite])
-# Les deux valeurs dans [0, 1]
+obs, reward, terminated, truncated, info = sim.step([left_amp, right_amp])
+# left_amp, right_amp ∈ [0, 1]
 ```
 
 En interne, il :
-1. Définit les amplitudes intrinsèques du CPG depuis `control_signal`
-2. Avance 6 oscillateurs couplés (un par patte)
-3. Applique la règle de rétraction (soulève les pattes coincées dans des failles)
-4. Applique la règle de trébuchement (corrige les pattes qui heurtent des obstacles)
-5. Appelle `physics.step()` (1 pas de physique MuJoCo = 0,1 ms)
 
-**Mécanisme de virage :** réduire l'amplitude d'un côté ralentit ces pattes → la mouche courbe vers ce côté.
-- `[1.0, 1.0]` → tout droit à pleine vitesse
-- `[0.5, 1.0]` → virage à gauche (pattes gauches plus lentes)
-- `[1.0, 0.5]` → virage à droite (pattes droites plus lentes)
-- `[0.3, 0.3]` → marche lente (les deux côtés au minimum)
+1. Définit les amplitudes du CPGNetwork (6 oscillateurs couplés, un par patte)
+2. Produit l'allure tripode : Tripode A (LF, RM, RH) et Tripode B (RF, LM, LH) en opposition de phase
+3. Applique les règles de trébuchement et rétraction (stabilité sur terrain irrégulier)
+4. Appelle `physics.step()` (1 microstep MuJoCo = 0.1 ms)
 
-### CPGNetwork
+**Mécanisme de virage** : réduire l'amplitude d'un côté ralentit ce tripode → la mouche courbe vers ce côté.
 
-6 oscillateurs, un par patte, avec des **biais de phase tripode**. La matrice de relations de phase assure que le Tripode A (LF, RM, RH) et le Tripode B (RF, LM, LH) oscillent en opposition de phase (π radians d'écart). Fréquence par défaut : 12 Hz (12 cycles de pas complets par seconde).
+### Capteurs olfactifs
 
-### OdorArena
+`obs["odor_intensity"]` → shape `(1, 4)` → `[ant_gauche, ant_droite, palpe_gauche, palpe_droite]`
 
-Un plan de sol plat avec des sources d'odeur ponctuelles. Concentration d'odeur à la position `r` d'une source : `C(r) = intensité_max / r²` (diffusion en inverse du carré). Les 4 capteurs olfactifs de la mouche (2 antennes + 2 palpes maxillaires) lisent chacun la concentration locale. L'asymétrie gauche/droite des capteurs peut guider les virages — c'est la base biologique de la navigation olfactive.
-
-Dans notre simulation : la source d'odeur existe dans l'arène mais le modèle cérébral ne la lit pas encore. C'est l'infrastructure pour une intégration future.
+La concentration suit une loi d'inverse du carré : `C(r) = peak_intensity / r²`. Avec `peak_intensity = 500`, l'odeur atteint ~2 à 15 mm, ~100 à 7 mm, ~1 500 à moins de 2 mm de la source.
 
 ---
 
 ## Interface cerveau-corps
 
-C'est le cœur du projet. La réalité biologique est que les neurones descendants (DNs) sont les **seuls câbles** reliant le cerveau au système moteur. On lit leur activité et on la traduit en une commande de locomotion 2D.
+C'est le cœur du projet. Les neurones descendants (DNs) sont les **seuls câbles biologiques** reliant le cerveau au système moteur.
 
-### Étape 1 : Discrétisation des trains de décharges
+### Readout moteur des DNs
 
-La simulation cérébrale de 1000 ms est divisée en 40 fenêtres de 25 ms chacune. Pour chaque fenêtre, on compte combien de décharges ont été émises par chaque groupe de DNs :
-
-```python
-bin_edges = np.linspace(0.0, 1.0, 41)   # 40 fenêtres
-left_rate[t]  = somme des décharges dans la fenêtre t des DNs côté gauche
-right_rate[t] = somme des décharges dans la fenêtre t des DNs côté droit
-both_rate[t]  = somme des décharges dans la fenêtre t des DNs bilatéraux
-```
-
-### Étape 2 : Propulsion en avant (amplitude)
-
-Activité totale des DNs → vitesse de marche :
-```python
-total_rate = left_rate + right_rate + both_rate
-# Lisser avec une moyenne mobile (fenêtre = 8 bins = 200 ms)
-total_smooth = convolve(total_rate, fenêtre_uniforme)
-# Normaliser dans [0, 1]
-dn_amp = total_smooth / total_smooth.max()
-```
-
-### Étape 3 : Biais de virage (asymétrie)
-
-Différence de tir gauche vs droite des DNs → direction de virage :
-```python
-lr_diff = (left_rate - right_rate) / (left_rate + right_rate + ε)
-# Plage : [-1, 1]
-# Positif → plus de DNs gauches → la mouche tourne à gauche
-# Négatif → plus de DNs droits → la mouche tourne à droite
-```
-
-### Étape 4 : Signal de contrôle
+Le run Brian2 de 10 s est découpé en 400 fenêtres de 25 ms (une par décision physique) :
 
 ```python
-base = MIN_AMP + (1 - MIN_AMP) * dn_amp[t]   # [0,3, 1,0]
-bias = lr_diff[t] * 0.4                        # ±0,4 maximum
+bin_edges = np.linspace(0.0, 10.0, 401)   # 400 fenêtres de 25 ms
 
-control_signals[t, 0] = clip(base - bias, 0, 1)  # pattes gauches
-control_signals[t, 1] = clip(base + bias, 0, 1)  # pattes droites
+left_rate[t]  = Σ spikes DNs gauches dans la fenêtre t
+right_rate[t] = Σ spikes DNs droits dans la fenêtre t
 ```
 
-`MIN_AMP = 0.3` garantit que la mouche ne s'arrête jamais complètement — biologiquement, une mouche recevant un retour proprioceptif de ses pattes en mouvement devrait continuer à marcher.
+Asymétrie gauche/droite :
 
-### Étape 5 : Répétition temporelle
+```python
+lr_diff[t] = (left_rate[t] - right_rate[t]) / (left_rate[t] + right_rate[t] + ε)
+# Plage [-1, 1]
+```
 
-Le cerveau tourne pendant 1 seconde, mais on veut 3,75 secondes de physique (= 15 secondes de vidéo à 0,25× de vitesse de lecture). Le signal de contrôle de 40 décisions est répété (~3,75×) pour remplir la durée complète de la simulation.
+### Calcul du signal de contrôle
+
+Le virage est principalement guidé par l'odeur, avec une modulation cérébrale subtile :
+
+```python
+# Guidage olfactif (signal principal)
+lr_asym   = (right_odor - left_odor) / (total_odor + ε)
+odor_turn = np.tanh(lr_asym * 20.0) * ODOR_TURN_K   # ODOR_TURN_K = 2.5
+
+# Modulation cérébrale (variation biologique)
+dn_bias = lr_diff[t] * 0.15
+
+turn_bias = odor_turn + dn_bias
+left_amp  = clip(WALK_AMP + turn_bias, 0.1, 1.0)
+right_amp = clip(WALK_AMP - turn_bias, 0.1, 1.0)
+```
+
+Le `np.tanh` amplifie les petites asymétries d'odeur (signal faible à longue distance) en un virage décisif. Le facteur `×0.15` sur le biais DN garantit que le cerveau influence la trajectoire sans écraser le signal olfactif.
 
 ---
 
-## Paramètres de configuration
+## Visualisation cérébrale
 
-Toutes les constantes réglables sont en haut de `brain_body_v2.py` :
+### Système de glow à décroissance exponentielle
+
+Pour chaque frame vidéo, un vecteur de glow `[n_neurons]` est calculé :
+
+```python
+glow *= exp(-FRAME_DT_MS / DECAY_TAU_MS)   # décroissance τ=80 ms
+glow[spiked_neurons] += 1.0                 # spike → boost instantané
+```
+
+Le glow est normalisé sur le pic global puis appliqué comme taille et couleur de chaque point scatter.
+
+### Cinq couches superposées par frame
+
+| Couche | Neurones | Couleur | Comportement |
+| --- | --- | --- | --- |
+| Fond | 138 617 | Navy `#1a3a5c` | Statique, anatomie toujours visible |
+| LIF | 138 617 | Cyan → blanc | Glow ∝ activité de spike individuelle |
+| DN | 1 299 | Vert vif | Alpha fixe 0.75, vmax=0.25 (petits spikes → vert vif) |
+| Olfactif | 2 279 | Rose/magenta | Stimulés @ 80 Hz dans Brian2 ; alpha ∝ intensité d'odeur |
+| SEZ | 408 | Orange | Stimulés @ 80 Hz dans Brian2 ; alpha ∝ phase d'alimentation |
+
+Les neurones olfactifs (ORN/PN, 2 279) et SEZ/alimentation (408) reçoivent leur propre groupe de stimulation Poisson dans Brian2 (`exc2` @ 80 Hz), séparé des neurones ascendants (150 Hz). Cela leur donne de **vrais trains de spikes individuels** — chaque neurone fire à sa propre fréquence selon ses connexions synaptiques. L'alpha de la couche est modulé par l'état comportemental (intensité d'odeur ou phase d'alimentation) pour refléter la pertinence contextuelle.
+
+---
+
+## Comportement de navigation et d'alimentation
+
+### Chronologie typique
+
+| Temps physique | Comportement | Neurones actifs |
+| --- | --- | --- |
+| 0–2 s | Marche vers la nourriture | DN (vert) |
+| ~1–2 s | Odeur détectée, virages | DN + olfactif (rose) |
+| ~2.4 s | Dist < 1.2 mm → alimentation | DN + olfactif + SEZ (orange) |
+| ~2.4–2.9 s | Proboscis s'étend (0→1 en 0.5 s) | SEZ (orange) |
+| ~2.9–4.9 s | Alimentation active (léchage simulé) | SEZ (orange) |
+| ~4.9–5.4 s | Proboscis se rétracte | SEZ (orange) |
+| ~5.4 s | Reprend la marche | DN (vert) |
+
+### Proboscis (sonde bleue)
+
+Le proboscis est simulé par un corps mocap MuJoCo (capsule bleue) positionné entre le `0/Haustellum` (bout de la bouche à ~[0.58, 0, 1.20] mm) et la nourriture. L'orientation est calculée par quaternion de rotation de l'axe Z vers la direction `food_pos - haustellum_pos`. La longueur extension suit une courbe en S via un timer normalisé.
+
+---
+
+## Paramètres clés
+
+Toutes les constantes réglables sont en haut de `fly_brain_body_simulation.py` :
 
 | Paramètre | Défaut | Effet |
-|-----------|--------|-------|
-| `BRAIN_DURATION_MS` | 1000 | Durée de la simulation neuronale (ms). Plus long = plus de diversité dans les patterns de contrôle, mais plus de temps de calcul. |
-| `STIM_RATE_HZ` | 150 | Taux de stimulation Poisson des neurones ascendants (Hz). Plus élevé = plus de neurones s'activent = signal de locomotion plus fort. |
-| `DECISION_INTERVAL` | 0,025 | Durée de chaque fenêtre de contrôle (secondes). Plus court = plus réactif aux fluctuations neuronales. |
-| `PHYSICS_TIMESTEP` | 1e-4 | Taille du pas de physique MuJoCo (secondes). Ne pas dépasser 1e-4 ou la simulation devient instable. |
-| `MIN_AMP` | 0,3 | Amplitude minimale du CPG (0–1). Empêche la mouche de s'arrêter quand l'activité des DNs est faible. |
-| `VIDEO_DURATION_S` | 15,0 | Durée cible de la vidéo de sortie (secondes) à `play_speed`. |
-| `play_speed` | 0,25 | Vitesse de lecture vidéo par rapport au temps réel. 0,25 = ralenti × 4. La physique tourne 0,25× aussi longtemps que la vidéo. |
+| --- | --- | --- |
+| `PHYS_DURATION_S` | 10.0 s | Durée physique + cérébrale (identiques) |
+| `PLAY_SPEED` | 0.25 | Ralenti 4× (10 s physique = 40 s vidéo) |
+| `STIM_RATE_HZ` | 150 Hz | Stimulation Poisson des neurones ascendants |
+| `FOOD_POS` | [18, 12, 0] mm | Position de la nourriture (~22 mm du spawn) |
+| `FEED_DIST` | 1.2 mm | Seuil de distance pour déclencher l'alimentation |
+| `FEED_DUR` | 2.0 s | Durée de la phase d'alimentation active |
+| `ODOR_TURN_K` | 2.5 | Force du virage olfactif |
+| `WALK_AMP` | 0.75 | Amplitude de marche de base [0–1] |
+| `DECAY_TAU_MS` | 80 ms | Constante de décroissance du glow cérébral |
+| `DECISION_INTERVAL` | 0.025 s | Durée d'une fenêtre de contrôle (25 ms) |
 
 ---
 
-## Fichiers de données
+## Structure du dépôt
 
-### `brain_model/Completeness_783.csv`
-Table d'index neuronal du connectome FlyWire version 783.
-
-| Colonne | Description |
-|---------|-------------|
-| Index (label de ligne) | ID racine FlyWire (entier 64 bits unique à chaque neurone) |
-| Autres colonnes | Métadonnées de complétude (couverture axone/dendrite) |
-
-L'ordre des lignes définit l'index neuronal Brian2. Le neurone `i` dans Brian2 correspond à la ligne `i` de ce CSV.
-
-### `brain_model/Connectivity_783.parquet`
-Table des synapses. Chaque ligne est une synapse (connexion directionnelle).
-
-| Colonne | Description |
-|---------|-------------|
-| `Presynaptic_Index` | Index Brian2 du neurone émetteur |
-| `Postsynaptic_Index` | Index Brian2 du neurone récepteur |
-| `Excitatory x Connectivity` | Force signée : positif = excitatrice, négatif = inhibitrice |
-
-### `brain_model/flywire_annotations.tsv`
-Annotations de types cellulaires pour les 139 244 neurones.
-
-Colonnes clés :
-- `root_id` — ID FlyWire (correspond à l'index CSV)
-- `super_class` — type grossier : `ascending`, `descending`, `visual`, `olfactory`, `central`, etc.
-- `cell_class` — classification plus fine
-- `cell_type` — type nommé spécifique (ex. : `MDN`, `DNa01`, `DNg02_a`)
-- `side` — `left`, `right`, ou vide (bilatéral)
-
-Source : Schlegel et al. (2024), données supplémentaires de l'article FlyWire.
-
-### `brain_model/descending_neurons.csv`
-Sous-ensemble filtré : 1 299 neurones descendants.
-
-| Colonne | Description |
-|---------|-------------|
-| `root_id` | ID FlyWire |
-| `cell_type` | Type nommé (ex. : `MDN`, `DNa01`) |
-| `top_nt` | Neurotransmetteur dominant |
-| `side` | `left`, `right`, ou vide |
+```text
+fly_brain_simulation/
+├── fly_brain_body_simulation.py   # pipeline complet — point d'entrée unique
+├── brain_model/
+│   ├── model.py                   # constructeur réseau LIF Brian2 (create_model, poi)
+│   ├── Completeness_783.csv       # index 138 639 neurones (FlyWire v783)
+│   ├── Connectivity_783.parquet   # table synapses (~50M lignes)
+│   ├── flywire_annotations.tsv    # types cellulaires + coordonnées soma/pos
+│   └── descending_neurons.csv     # 1 299 DNs avec côté latéral
+├── simulations/
+│   └── vN_brain_body_v4.mp4       # vidéos versionnées
+├── .env                           # MUJOCO_GL=egl (renderer GPU)
+├── CLAUDE.md                      # instructions pour Claude Code
+└── README.md                      # ce fichier
+```
 
 ---
 
 ## Dépendances
 
-Toutes installées dans `wenv310/` (environnement virtuel Python 3.10, Windows) :
+Toutes pré-installées dans `wenv310/` (Python 3.10, Windows) :
 
-| Paquet | Rôle |
-|--------|------|
-| `brian2` | Simulation de réseau de neurones à décharges |
-| `flygym` (v1.2.1) | Modèle corporel NeuroMechFly + environnement MuJoCo |
-| `dm_control` | Bindings Python MuJoCo de DeepMind |
-| `mujoco` | Moteur physique |
-| `numpy` | Calcul matriciel |
-| `pandas` | Chargement des données du connectome |
-| `python-dotenv` | Chargement du `.env` pour la config du renderer |
-| `imageio` | Encodage vidéo (utilisé par le Camera de flygym) |
-| `ffmpeg` | Codec vidéo (dépendance système, appelé par imageio) |
-
----
-
-## Limitations connues et décisions de conception
-
-### 1. Le VNC est contourné
-Le vrai cerveau de la mouche se connecte au VNC qui contient les CPGs produisant la marche. Nous avons remplacé le VNC par le `CPGNetwork` de flygym. Le cerveau fournit seulement un signal 2D grossier de vitesse/direction — il ne génère pas les commandes individuelles pour chaque articulation. Combler cet écart nécessiterait un modèle complet du connectome du VNC.
-
-### 2. Le signal cérébral est répété en boucle
-Le cerveau tourne pendant 1 seconde et produit 40 fenêtres de contrôle. Pour une vidéo de 15 secondes, ce signal est répété ~3,75×. La mouche marche donc avec le même "rythme" neural en boucle. Un correctif approprié consisterait à faire tourner le cerveau en continu en parallèle de la physique, avec un retour sensoriel fermant la boucle.
-
-### 3. Pas de boucle de retour sensoriel
-Les neurones ascendants sont stimulés avec du bruit de Poisson fixe — ils ne répondent pas réellement aux mouvements des pattes simulées. Un système en boucle fermée lirait les positions des pattes depuis la simulation physique et les utiliserait pour définir l'activité des neurones ascendants. C'est l'écart clé entre ce travail et le résultat d'Eon Systems.
-
-### 4. L'olfaction n'est pas connectée au cerveau
-L'`OdorArena` envoie des lectures d'odeur aux capteurs virtuels de la mouche, mais ces données ne sont pas rebouclées dans le modèle Brian2. Connecter les neurones olfactifs (neurones de projection dans le lobe antennaire) au modèle cérébral permettrait une vraie navigation guidée par les odeurs.
-
-### 5. Sortie neuronale stochastique
-Brian2 avec entrée de Poisson est stochastique — chaque exécution produit des trains de décharges légèrement différents à cause du processus de Poisson aléatoire. C'est biologiquement réaliste (les neurones sont bruités) mais signifie que la mouche marchera légèrement différemment à chaque exécution.
-
-### 6. Ordre des imports (spécifique à Windows)
-L'ordre `flygym` → `load_dotenv()` doit être respecté. Voir [Comment exécuter](#comment-exécuter).
+| Paquet | Version | Rôle |
+| --- | --- | --- |
+| `brian2` | ≥2.5 | Simulation réseau LIF |
+| `flygym` | 1.2.1 | NeuroMechFly + MuJoCo |
+| `dm_control` | latest | Bindings MuJoCo DeepMind |
+| `mujoco` | latest | Moteur physique |
+| `numpy` | latest | Calcul matriciel |
+| `pandas` | latest | Chargement connectome |
+| `matplotlib` | latest | Rendu panneau cérébral |
+| `scipy` | latest | Quaternions (orientation proboscis) |
+| `imageio` | latest | Encodage vidéo |
+| `python-dotenv` | latest | Config `.env` |
 
 ---
 
-## Historique des versions
+## Base scientifique
 
-| Fichier | Vidéo(s) | Description |
-|---------|----------|-------------|
-| `main.py` | v1 | Animation des ailes, pas d'avancement physique |
-| `walking_ani.py` | v2 | Marche avec politique aléatoire via l'env `walk_imitation` (inclut une trajectoire fantôme de référence) |
-| `brain_body_simulation.py` | v3–v5 | Corps flybody, allure tripode codée à la main, entrée de neurones ascendants, readout moteur DN |
-| `brain_body_v2.py` | v6+ | NeuroMechFly v2 flygym, HybridTurningController + CPGNetwork, OdorArena, YawOnlyCamera |
+**Modèle cérébral** — basé sur [philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model) :
+> Shiu et al. (2023). *A leaky integrate-and-fire computational model based on the connectome of the entire adult Drosophila brain reveals insights into sensorimotor processing.* PLOS Computational Biology.
+> DOI : [10.1371/journal.pcbi.1011280](https://doi.org/10.1371/journal.pcbi.1011280)
 
-### Sous-versions de `brain_body_v2.py` (suivies par numéro de vidéo)
+**Connectome FlyWire v783** — [flywire.ai](https://flywire.ai) :
+> Dorkenwald et al. (2024). *Neuronal wiring diagram of an adult brain.* Nature.
+> DOI : [10.1038/s41586-024-07558-y](https://doi.org/10.1038/s41586-024-07558-y)
+>
+> Schlegel et al. (2024). *Whole-brain annotation and multi-connectome cell typing quantifies circuit stereotypy in Drosophila.* Nature.
+> DOI : [10.1038/s41586-024-07686-5](https://doi.org/10.1038/s41586-024-07686-5)
 
-| Vidéo | Changement clé |
-|-------|---------------|
-| v6 | Première exécution flygym, caméra fixe vue du dessus |
-| v7 | Étendu à 15 s, caméra fixe |
-| v8 | YawOnlyCamera `camera_top_right` — caméra de suivi isométrique |
-| v9 | Ajout d'une phase de toilettage (pattes avant levées vers le visage) |
-| v10 | Tentative `camera_right_front` + angles de toilettage plus agressifs → mouche renversée |
-| v11+ | Retour à la configuration stable v8, sans toilettage |
+**Modèle corporel NeuroMechFly v2** — [neuromechfly.org](https://neuromechfly.org) | [flygym/flygym](https://github.com/NeuromechFly/flygym) :
+> Lobato-Rios et al. (2023). *NeuroMechFly 2.0, a framework for simulating embodied sensorimotor control in adult Drosophila.* Nature Methods.
+> DOI : [10.1038/s41592-024-02497-y](https://doi.org/10.1038/s41592-024-02497-y)
+
+**Moteur physique MuJoCo** — [mujoco.org](https://mujoco.org) | [google-deepmind/mujoco](https://github.com/google-deepmind/mujoco) :
+> Todorov et al. (2012). *MuJoCo: A physics engine for model-based control.* IROS.
+> DOI : [10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109)
+
+**Brian2** — [brian2.readthedocs.io](https://brian2.readthedocs.io) | [brian-team/brian2](https://github.com/brian-team/brian2) :
+> Stimberg et al. (2019). *Brian 2, an intuitive and efficient neural simulator.* eLife.
+> DOI : [10.7554/eLife.47314](https://doi.org/10.7554/eLife.47314)
+
+---
+
+## Limitations et perspectives
+
+### 1. VNC non modélisé — problème de recherche ouvert
+
+**Cause** : pas un manque de données. Le connectome du VNC (*Ventral Nerve Cord*, équivalent de la moelle épinière) a été partiellement mappé par FlyWire. Le problème est **l'intégration** : le VNC contient ~70 000 neurones supplémentaires incluant les CPGs (générateurs de rythme centraux) qui produisent réellement les commandes individuelles pour chaque articulation de patte. Connecter correctement ces ~70 000 neurones VNC aux 87 DOF du modèle MuJoCo — en respectant la topographie neuronale et les types moteurs — est un problème de recherche ouvert que personne n'a encore résolu. Nous contournons avec le CPGNetwork de flygym qui génère directement l'allure tripode depuis un signal 2D grossier.
+
+**Prochaine étape** : intégrer le connectome VNC de Janelia (*FANC*, 2023) et mapper les neurones moteurs annotés aux DOF MuJoCo correspondants.
+
+### 2. Retour proprioceptif — ✅ implémenté
+
+**Ce qu'on avait** : les neurones ascendants recevaient un bruit Poisson **uniforme et constant** à 150 Hz pendant toute la durée du run Brian2 (10 s d'un bloc). Le cerveau "entendait" toujours le même signal quelle que soit l'activité de la mouche — que la mouche marche ou s'arrête pour manger, les 1 736 neurones ascendants tiraient de la même façon. C'était biologiquement inexact : en réalité, les propriocepteurs des pattes s'arrêtent de tirer quand les pattes sont immobiles.
+
+**L'autre problème architectural** : Brian2 tournait entièrement en amont, avant la simulation physique. Il était donc impossible de lire l'état des pattes et de le renvoyer vers le cerveau — il n'y avait pas de boucle, seulement deux pipelines séquentiels.
+
+**Ce qu'on a changé** :
+
+1. **Architecture entrelacée** : au lieu d'un seul `net.run(10 000 ms)`, la boucle physique appelle maintenant `net.run(25 ms)` à chaque décision. Brian2 et MuJoCo avancent en synchronie, pas l'un après l'autre.
+
+2. **`PoissonInput` → `PoissonGroup`** : `PoissonInput` en Brian2 a un taux fixé à la création, non modifiable entre les runs. On est passé à `PoissonGroup`, dont l'attribut `rates` est un tableau numpy qu'on peut écraser entre chaque step de 25 ms.
+
+3. **Encodage vitesse → taux** : à chaque décision, on calcule `delta = obs["joints"] - prev_joints`, puis `velocity = ||delta|| / dt`. On normalise par `MAX_JOINT_VELOCITY = 8.0 rad/s` et on mappe vers :
+
+   ```text
+   r = SENSORY_STIM_RATE × (PROPRIO_MIN + (1 − PROPRIO_MIN) × clamp(velocity / max, 0, 1))
+   ```
+
+   — soit entre `0.15 × 150 Hz = 22 Hz` (immobilité totale) et `150 Hz` (marche rapide).
+
+**Effet biologique observé** :
+
+- Pendant la **marche** : pattes bougent rapidement → taux ascendant proche de 150 Hz → le cerveau reçoit un fort signal de locomotion, les DNs s'activent.
+- Pendant l'**alimentation** : pattes quasi-immobiles → taux chute vers ~22 Hz → l'activité ascendante réduit, ce qui est cohérent avec le comportement réel de la drosophile qui cesse tout mouvement de pattes pendant le repas.
+- La **sortie DN** est maintenant **causale** : elle reflète le vrai état neural au moment de la décision, pas un signal pré-calculé sur une simulation déconnectée.
+
+### 3. Joints de la bouche supprimés — limitation du modèle flygym
+
+**Cause** : décision de conception de l'équipe NeuroMechFly. Leur modèle XML (`neuromechfly_seqik_kinorder_ypr.xml`) inclut la géométrie du proboscis (`0/Haustellum`, `0/Rostrum`, `0/Labrum`) mais ces corps sont des géométries fixes sans joints ni actionneurs. Ils ont été intentionnellement exclus car les études de locomotion ne nécessitent pas d'articulation buccale.
+
+**Ce qui existe** : les corps et géométries 3D sont présents (visibles dans MuJoCo viewer). Les positions (`xpos`) sont accessibles. Seuls les joints manquent dans le modèle compilé.
+
+**Solutions possibles** :
+
+- Modifier le XML source de flygym et réinstaller le package — risqué (peut casser la validation `HybridTurningController`)
+- Créer une sous-classe `FlyWithMouth(Fly)` qui surcharge `_add_joint_actuators` — architecturalement propre mais `HybridTurningController` valide strictement `actuated_joints == all_leg_dofs`
+- Approche actuelle (mocap) : corps mocap positionné manuellement via `physics.data.mocap_pos` — aucune physique, mais visuellement convaincant
+
+### 4. Stimulation cérébrale contextuelle — ✅ résolue par le retour proprioceptif
+
+**Ce qu'on avait** : les neurones ascendants étaient stimulés à taux constant (150 Hz Poisson) pendant toute la durée du run, indépendamment du comportement. Le cerveau produisait un signal de locomotion continu même pendant les phases d'alimentation où la mouche est immobile. La modulation comportementale (rose/orange) était calculée depuis le signal physique, pas depuis le cerveau — les deux pipelines étaient découplés.
+
+**Ce qui est résolu** : grâce au retour proprioceptif (limitation #2), le taux de stimulation des neurones ascendants varie maintenant avec l'état locomoteur réel. Pendant l'alimentation, les pattes cessent de bouger, la vitesse articulaire tombe à ~0, et le taux Poisson chute à ~22 Hz. Le cerveau reçoit un signal différent selon que la mouche marche ou mange — la modulation comportementale émerge naturellement de la dynamique neurale, pas d'une règle codée en dur.
+
+### 5. Performance — backend C++ activé ✅
+
+Le backend C++ est désormais opérationnel. Visual Studio 2022 Community avec "Desktop development with C++" est installé, et le script `run.bat` configure automatiquement l'environnement MSVC. Le run de 10 s prend **~5 min** (Brian2 seul) au lieu de ~50 min avec numpy.
+
+Le backend numpy reste disponible en commentant une ligne dans le script — utile si Visual Studio n'est pas installé sur une autre machine.
+
+---
+
+## Positionnement dans l'écosystème open source
+
+À notre connaissance, **aucun projet open source public ne combine les trois couches** de cette simulation (connectome complet + physique du corps + boucle sensorielle fermée) pour *Drosophila*. Voici l'état de l'art :
+
+### Projets existants — cerveau seul
+
+- **[philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model)** — le modèle Brian2 LIF sur le connectome FlyWire que nous utilisons. Pas de corps.
+  > Shiu et al. (2023). PLOS Computational Biology.
+
+- **[FlyWire](https://flywire.ai)** — l'atlas connectomique complet. Données et outil d'annotation, pas de simulation.
+  > Dorkenwald et al. (2024). Nature.
+
+### Projets existants — corps seul
+
+- **[flygym/flygym](https://github.com/NeuromechFly/flygym)** — NeuroMechFly v2, simulation physique du corps avec locomotion CPG, olfaction, vision. Pas de cerveau connectomique.
+  > Lobato-Rios et al. (2023). Nature Methods.
+
+### L'analogue le plus proche — autre organisme
+
+- **[OpenWorm](https://openworm.org)** — simulation complète cerveau + corps de *C. elegans* (ver nématode). Architecture conceptuellement identique à ce projet : les 302 neurones du connectome pilotent un corps physique en boucle fermée. Open source depuis 2011, projet de référence mondial.
+  > Code source : [github.com/openworm](https://github.com/openworm)
+
+### Ce qui n'existe pas encore publiquement
+
+La combinaison **connectome Drosophila complet (138 639 neurones) → corps physique 3D → retour sensoriel en boucle fermée** n'a pas été publiée en open source. Des prototypes internes existent dans certains laboratoires (Janelia Research Campus, Princeton Neuroscience Institute, groupe FlyWire) mais aucun n'est accessible au public sous forme intégrée.
+
+### Ce que ce projet apporte
+
+| Couche | Ce projet | État de l'art public |
+| --- | --- | --- |
+| Cerveau LIF sur connectome réel | ✅ 138 639 neurones, 10 s continus | ✅ philshiu (1 s, pas de corps) |
+| Corps physique 3D MuJoCo | ✅ NeuroMechFly, 87 DOF | ✅ flygym (pas de cerveau) |
+| Navigation olfactive connectée au cerveau | ✅ ORN/PN stimulés @ 80 Hz Brian2 | ❌ flygym (corps seul, pas de cerveau) |
+| Comportement alimentaire (SEZ) | ✅ proboscis + SEZ stimulé @ 80 Hz | ❌ pas de projet public |
+| Visualisation circuits en temps réel | ✅ 5 couches colorées (cyan/vert/rose/orange) | ❌ pas de projet public |
+| Backend C++ Brian2 | ✅ Visual Studio 2022, ~5 min/run | ✅ standard sur Linux |
+| Boucle sensorielle fermée (proprio) | ✅ corps → cerveau via vitesse articulaire | ❌ pas de projet public |
+
+La boucle est maintenant entièrement fermée : le cerveau influence le corps (via les DNs), et le corps influence le cerveau (via le retour proprioceptif des neurones ascendants). Auparavant, les deux pipelines tournaient séquentiellement sans échange — Brian2 d'abord, physique ensuite. La refonte en architecture entrelacée (400 × 25 ms) a rendu ce retour possible.
+
+---
+
+## Attributions
+
+Ce projet ne serait pas possible sans le travail des équipes suivantes. Tout le code scientifique de base — connectome, modèle LIF, simulation physique, moteur physique — provient de ces projets open source.
+
+### Connectome FlyWire v783
+
+- **FlyWire** — [flywire.ai](https://flywire.ai) | [Princeton FlyWire GitHub](https://github.com/seung-lab/cloud-volume)
+  Carte complète du cerveau adulte de *Drosophila* par microscopie électronique en transmission. 138 639 neurones, ~50 millions de synapses. Les fichiers `Completeness_783.csv`, `Connectivity_783.parquet` et `flywire_annotations.tsv` utilisés ici en sont issus.
+  > Dorkenwald et al. (2024). *Neuronal wiring diagram of an adult brain.* Nature. [10.1038/s41586-024-07558-y](https://doi.org/10.1038/s41586-024-07558-y)
+  > Schlegel et al. (2024). *Whole-brain annotation and multi-connectome cell typing.* Nature. [10.1038/s41586-024-07686-5](https://doi.org/10.1038/s41586-024-07686-5)
+
+### Modèle LIF sur connectome Drosophila
+
+- **philshiu/Drosophila_brain_model** — [github.com/philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model)
+  Implémentation Brian2 du réseau LIF sur le connectome FlyWire. Le fichier `brain_model/model.py` (`create_model`, `poi`, `default_params`) est directement dérivé de ce dépôt.
+  > Shiu et al. (2023). *A leaky integrate-and-fire computational model based on the connectome of the entire adult Drosophila brain.* PLOS Computational Biology. [10.1371/journal.pcbi.1011280](https://doi.org/10.1371/journal.pcbi.1011280)
+
+### Simulation corporelle NeuroMechFly
+
+- **flygym/flygym** — [github.com/NeuromechFly/flygym](https://github.com/NeuromechFly/flygym) | [neuromechfly.org](https://neuromechfly.org)
+  Framework Python pour la simulation sensorimotrice de *Drosophila* adulte. Fournit `HybridTurningController`, `OdorArena`, `Fly`, `YawOnlyCamera` utilisés dans ce projet.
+  > Lobato-Rios et al. (2023). *NeuroMechFly 2.0, a framework for simulating embodied sensorimotor control in adult Drosophila.* Nature Methods. [10.1038/s41592-024-02497-y](https://doi.org/10.1038/s41592-024-02497-y)
+
+- **TuragaLab/flybody** — [github.com/TuragaLab/flybody](https://github.com/TuragaLab/flybody)
+  Dépendance de flygym fournissant le modèle MuJoCo XML de la mouche et les utilitaires de contrôle bas niveau.
+
+### Moteur physique MuJoCo
+
+- **google-deepmind/mujoco** — [github.com/google-deepmind/mujoco](https://github.com/google-deepmind/mujoco) | [mujoco.org](https://mujoco.org)
+  Moteur de simulation physique à base de contraintes. Gère les 87 DOF, la détection de contact, les coussinets adhésifs et les corps mocap utilisés pour le proboscis.
+  > Todorov et al. (2012). *MuJoCo: A physics engine for model-based control.* IROS. [10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109)
+
+### Simulateur de réseau de neurones Brian2
+
+- **brian-team/brian2** — [github.com/brian-team/brian2](https://github.com/brian-team/brian2) | [brian2.readthedocs.io](https://brian2.readthedocs.io)
+  Simulateur Python de réseaux de neurones à décharges. Utilisé pour les 138 639 neurones LIF, les synapses avec délai, et les groupes Poisson dynamiques pour le retour proprioceptif.
+  > Stimberg et al. (2019). *Brian 2, an intuitive and efficient neural simulator.* eLife. [10.7554/eLife.47314](https://doi.org/10.7554/eLife.47314)
+
+### Référence conceptuelle — simulation cerveau-corps complète
+
+- **OpenWorm** — [openworm.org](https://openworm.org) | [github.com/openworm](https://github.com/openworm)
+  Premier projet open source à avoir réalisé une simulation cerveau-corps complète pour *C. elegans* (302 neurones). Référence conceptuelle pour l'architecture de ce projet.

@@ -1,0 +1,32 @@
+# ── Fly brain-body simulation — Python 3.10, Windows ─────────────────────────
+# Install: pip install -r requirements.txt
+# Note: flybody is installed from GitHub (not on PyPI)
+# Note: Cython is needed for Brian2 C++ backend (optional but strongly recommended)
+
+# ── Brain simulation ──────────────────────────────────────────────────────────
+Brian2==2.9.0
+Cython==3.2.4          # Brian2 C++ backend (optional — numpy fallback if absent)
+
+# ── Body simulation ───────────────────────────────────────────────────────────
+flygym==1.2.1
+flybody @ git+https://github.com/TuragaLab/flybody.git@d015e9bfe441bd90ae431bac24c55cb74bdbce26
+dm_control==1.0.27
+mujoco==3.2.7
+
+# ── Scientific stack ──────────────────────────────────────────────────────────
+numpy==2.0.2
+pandas==2.3.3
+scipy==1.15.3
+joblib==1.5.3
+
+# ── Visualization & video ─────────────────────────────────────────────────────
+matplotlib==3.10.8
+imageio==2.37.3
+imageio-ffmpeg==0.6.0
+pillow==12.1.1
+
+# ── Data formats ──────────────────────────────────────────────────────────────
+pyarrow==23.0.1         # parquet support for connectome data
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.2.2

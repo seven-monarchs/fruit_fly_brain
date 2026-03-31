@@ -1,0 +1,614 @@
+# NeuroFly — Brain-Body Simulation of *Drosophila melanogaster*
+
+[🇫🇷 Français](README.md) | 🇬🇧 English
+
+![Simulation preview](simulations/preview.gif)
+
+A closed-loop simulation of *Drosophila melanogaster* (fruit fly) that couples a biologically accurate spiking neural network to a 3D physical body. Neural activity derived from the real fly connectome drives locomotion, olfactory navigation, and feeding behavior — all visualized in a split-screen video.
+
+The brain and body share a **single continuous timeline** (no loop, no replay). The brain runs for exactly as long as the physical simulation — 10 real seconds.
+
+> **Note**: personal project by a solo software developer, with no neuroscience training. Modeling choices are grounded in published papers and existing open-source tools (FlyWire, Brian2, NeuroMechFly) — any biological misinterpretation is my own.
+
+---
+
+## Table of Contents
+
+1. [Description](#description)
+2. [Video output](#video-output)
+3. [Installation](#installation)
+4. [Running](#running)
+5. [Architecture and pipeline](#architecture-and-pipeline)
+6. [The brain model — Brian2 LIF](#the-brain-model--brian2-lif)
+7. [The body model — NeuroMechFly](#the-body-model--neuromechfly)
+8. [Brain-body interface](#brain-body-interface)
+9. [Brain visualization](#brain-visualization)
+10. [Navigation and feeding behavior](#navigation-and-feeding-behavior)
+11. [Key parameters](#key-parameters)
+12. [Repository structure](#repository-structure)
+13. [Dependencies](#dependencies)
+14. [Scientific basis](#scientific-basis)
+15. [Limitations and future work](#limitations-and-future-work)
+16. [Attributions](#attributions)
+
+---
+
+## Description
+
+This project simulates three biological levels simultaneously and makes them interact in real time:
+
+**1. Brain — LIF network on real connectome**
+138,639 Leaky Integrate-and-Fire (LIF) neurons are instantiated from the FlyWire v783 connectome. The synaptic connections (~50 million) come directly from electron microscopy data. Ascending neurons (1,736 neurons) are stimulated via a dynamic Poisson process, propagating activity through the entire synaptic graph for 10 continuous seconds.
+
+**2. Body — MuJoCo physics simulation**
+A high-fidelity 3D model of *Drosophila* with 87 degrees of freedom, 6 legs, adhesive pads, 4 olfactory sensors (antennae + maxillary palps), and a mocap body for the proboscis. The fly navigates toward a food source, stops to feed, then resumes walking.
+
+**3. Full closed loop**
+Descending neurons (DNs) from the brain provide a left/right bias that modulates the fly's turning. In return, the leg kinematics from the physics simulation are encoded at each 25 ms step as firing rates of ascending neurons — the brain genuinely "hears" whether the fly is walking or stopped. The odor signal from physical sensors modulates the visibility of olfactory neurons, and the feeding state activates the SEZ layer.
+
+---
+
+## Video output
+
+```text
+simulations/vN_brain_body_v4.mp4
+```
+
+Layout (1280 × ~840 px):
+
+```text
+┌─────────────────────────────────────────────────┐  480 px
+│              brain activity panel               │
+│  cyan = LIF spikes   green = DN (locomotion)    │
+│  pink = olfactory    orange = SEZ (feeding)     │
+│  [state: "walking" / "odor detected" / "feeding"]│
+├──────────────────────┬──────────────────────────┤
+│   isometric view     │      top-down view       │  ~360 px
+│  (camera_top_right)  │  (camera_top_zoomout)    │
+└──────────────────────┴──────────────────────────┘
+   640 px                  640 px
+```
+
+The video plays at **0.25× real speed** — 10 s of physics = 40 s of video.
+
+---
+
+## Installation
+
+### System requirements
+
+- Windows 10 / 11 (64-bit)
+- **Python 3.10** — required exactly (flygym and Brian2 validated on 3.10)
+  Download: [python.org/downloads](https://www.python.org/downloads/release/python-31011/)
+- **ffmpeg** — required for video encoding
+  Download: [ffmpeg.org/download.html](https://ffmpeg.org/download.html) → add to PATH
+
+### Create the virtual environment
+
+Open a command prompt in the project folder:
+
+```bat
+REM Create the venv with Python 3.10 specifically
+py -3.10 -m venv wenv310
+
+REM Activate the venv
+wenv310\Scripts\activate
+
+REM Upgrade pip
+python -m pip install --upgrade pip
+```
+
+### Install dependencies
+
+```bat
+pip install -r requirements.txt
+```
+
+> **Note**: `flybody` installs from GitHub — git must be installed and available in PATH.
+> Download git: [git-scm.com](https://git-scm.com/download/win)
+
+### Configure the C++ backend for Brian2 (optional but strongly recommended — ×10 faster)
+
+Without a compiler, the simulation still runs via the numpy backend — `run.bat` switches automatically. With the C++ compiler, the Brian2 run goes from ~50 min to ~5 min.
+
+#### Step 1 — Install Visual Studio 2022
+
+Download **Visual Studio 2022 Community** (free):
+[visualstudio.microsoft.com/downloads](https://visualstudio.microsoft.com/downloads/)
+
+During installation, check the workload:
+**"Desktop development with C++"**
+
+> The **Build Tools** alone are sufficient if you don't want the full IDE:
+> [Download Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+
+#### Step 2 — Test the compiler
+
+Open a **new** command prompt (not PowerShell) and type:
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+cl.exe
+```
+
+Expected output (success):
+
+```text
+Microsoft (R) C/C++ Optimizing Compiler Version 19.xx...
+```
+
+If you get `'cl' is not recognized`: vcvarsall.bat was not called, or the C++ component is not installed.
+
+#### Step 3 — Test Brian2 with the C++ backend
+
+```bat
+wenv310\Scripts\activate
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+python -c "from brian2 import *; G = NeuronGroup(1, 'dv/dt = -v/ms : 1'); net = Network(G); net.run(1*ms); print('SUCCESS C++ BACKEND')"
+```
+
+If Brian2 compiles with Cython (first run ~30 s) and prints `SUCCESS C++ BACKEND`, the compiler is operational. `run.bat` will detect it automatically on every launch.
+
+---
+
+## Running
+
+**Recommended — use the launch script** (automatically configures the C++ compiler):
+
+```bat
+run.bat
+```
+
+Or manually from a command prompt with the VS environment:
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+wenv310\Scripts\python.exe fly_brain_body_simulation.py
+```
+
+**Estimated duration: ~2.5–3 hours** with the C++ backend (warm cache). The very first run adds ~13 min for C++ compilation (Brian2 compiles ~50M synapses via Cython/C++ once, then caches).
+
+Measured per-step cost (reference machine, 138k neurons, 50M synapses):
+
+| Step | Time per step | Total (400 steps) |
+| --- | --- | --- |
+| `net.run(25ms)` Brian2 | ~20–30 s | ~130–180 min |
+| MuJoCo physics + render | ~0.5 s | ~3 min |
+| Glow compute + brain render | — (after loop) | ~10 min |
+| Video write | — | ~2 min |
+| **TOTAL** | | **~2.5–3 h** |
+
+Live progress log is written to `logs/YYYY-MM-DD_HH-MM-SS_run.log` (stdout + stderr):
+
+```text
+  step 000/400  t=0.00s  [walk]  proprio=0ms  brian=24557ms  physics=9320ms  step_total=33879ms  asc=22Hz  DN L51/R49 lr=+0.02  dist=21.6mm  ETA=225.3min
+  step 010/400  t=0.25s  [walk]  proprio=0ms  brian=17696ms  physics=446ms   step_total=18142ms  asc=150Hz  DN L254/R248 lr=+0.01  dist=21.1mm  ETA=150.0min
+  FEEDING START  t=2.30s  dist=1.18mm
+  step 090/400  t=2.25s  [walk]  proprio=0ms  brian=21197ms  physics=521ms   step_total=21722ms  asc=150Hz  DN L264/R267 lr=-0.01  dist=1.6mm   ETA=122.0min
+```
+
+To fall back to the numpy backend (no compiler needed), uncomment in `fly_brain_body_simulation.py`:
+
+```python
+# from brian2 import prefs; prefs.codegen.target = "numpy"
+```
+
+> **Windows note**: `flygym` / `dm_control` must be imported **before** `load_dotenv()`. The `.env` sets `MUJOCO_GL=egl` (Linux GPU renderer). If loaded first on Windows, the import fails. The import order in the script is intentional.
+
+---
+
+## Architecture and pipeline
+
+```text
+[FlyWire v783 connectome data]
+        │
+        ▼
+[1. Load 138,639-neuron index + annotations]
+   Completeness_783.csv → Brian2 index
+   flywire_annotations.tsv → cell types, soma positions
+        │
+        ▼
+[2. Extract neuron groups]
+   Before any soma coordinate filtering:
+   - ascending (1,736)    → dynamic Poisson stimulation (proprioceptive feedback)
+   - olfactory ORN/PN (2,279) → pink layer, alpha ∝ odor intensity
+   - SEZ/feeding (408)    → orange layer, alpha ∝ feeding state
+   - DNs (1,299)          → green layer + motor readout
+        │
+        ▼
+[3. Build Brian2 LIF network]
+   138,639 LIF neurons, ~50M synapses, C++ backend (default)
+   PoissonGroup for ascending neurons (rates updated each step)
+   olfactory + SEZ stimulated @ 80 Hz (fixed Poisson)
+        │
+        ▼
+[4. Build flygym simulation]
+   OdorArena (food at [18,12,0] mm, peak_odor_intensity=500)
+   Fly spawned at (0,0,0.2) facing ~70° away from food
+   Two cameras: isometric + top-down view
+   Mocap proboscis probe (blue capsule)
+        │
+        ▼
+[5. Interleaved brain+physics loop — 400 × 25 ms decisions]
+   Each step:
+     obs["joints"] → joint velocity → ascending neuron rate (15–150 Hz)
+     net.run(25ms) → DN spike readout → lr_diff_t
+     odor gradient + DN bias → motor command [left_amp, right_amp]
+     250 MuJoCo microsteps
+     dist < 1.2 mm → feeding (probe extend→eat→retract)
+        │
+        ▼
+[6. Compute brain glow frames from accumulated spike trains]
+   ~300 frames @ 30 fps, exponential decay τ=80 ms
+        │
+        ▼
+[7. Render brain panels — 1,200 frames]
+   5 color-coded scatter layers stacked per frame:
+     navy background → LIF activity → green DN → pink olfactory → orange SEZ
+        │
+        ▼
+[8. Write split-screen video]
+   Top row: brain panel (1280×480)
+   Bottom row: iso view + top-down view (640×H each)
+   h264, CRF 18, yuv420p
+```
+
+---
+
+## The brain model — Brian2 LIF
+
+### Data source
+
+The FlyWire v783 connectome contains the complete map of every neuron and synapse in the adult *Drosophila melanogaster* brain, assembled by transmission electron microscopy (TEM) by the FlyWire project (Princeton, Janelia, UCL). Version 783 = 138,639 neurons, ~50 million synapses.
+
+### Leaky Integrate-and-Fire neuron model
+
+Each neuron is modeled by two differential equations:
+
+```text
+dv/dt = (v_0 - v + g) / t_mbr   [membrane dynamics — "leak" toward rest]
+dg/dt = -g / tau                  [synaptic conductance decay]
+```
+
+When `v` exceeds `v_th`, the neuron fires a spike and resets to `v_rst` for a refractory period `t_rfc`.
+
+### LIF parameters
+
+| Parameter | Value | Biological meaning |
+| --- | --- | --- |
+| `v_0` | -52 mV | Resting potential |
+| `v_th` | -45 mV | Firing threshold (+7 mV above rest) |
+| `v_rst` | -52 mV | Post-spike reset |
+| `t_mbr` | 20 ms | Membrane time constant |
+| `tau` | 5 ms | Synaptic conductance decay |
+| `t_rfc` | 2.2 ms | Refractory period |
+| `t_dly` | 1.8 ms | Synaptic transmission delay |
+| `w_syn` | 0.275 mV | Weight per synapse |
+| `r_poi` | 150 Hz | Max Poisson stimulation rate (ascending neurons) |
+| `r_poi2` | 80 Hz | Stimulation rate for olfactory (ORN/PN) and SEZ neurons |
+
+### Choice of stimulated neurons
+
+**Ascending neurons** are chosen as input because they constitute the primary proprioceptive channel — they carry the "legs are moving" signal from body to brain. Connectivity analysis shows they make 646 direct synapses onto locomotion DNs, reaching 28 distinct DNs — far more than any other sensory type.
+
+Their firing rate is **dynamic**: at each 25 ms window, leg angular velocity is computed from `obs["joints"]` and encoded as a Poisson rate between `PROPRIO_MIN × 150 Hz` (immobility) and `150 Hz` (fast walking). The brain receives a signal that reflects the fly's actual locomotor state at every moment.
+
+### C++ backend (default)
+
+Brian2 automatically compiles LIF equations to C++ via Cython — **10× faster** than pure-Python numpy. On Windows, this requires Visual Studio 2022 with "Desktop development with C++" and the MSVC environment initialized (`vcvarsall.bat x64`) before launching Python. `run.bat` handles this automatically.
+
+To force numpy backend:
+
+```python
+from brian2 import prefs; prefs.codegen.target = "numpy"
+```
+
+This line must be placed **before any Brian2 object creation**.
+
+### Soma positions for visualization
+
+- Axes: `soma_x` (left-right) vs inverted `soma_y` (dorsal-ventral)
+- `soma_z` is the depth axis at 40 nm/vox — too flat for a vertical axis
+- Neurons without `soma_x/y` (olfactory, SEZ) use `pos_x/y` as fallback — 100% coverage
+
+---
+
+## The body model — NeuroMechFly
+
+### MuJoCo model specifications
+
+| Property | Value |
+| --- | --- |
+| Total degrees of freedom | 87 joints |
+| Joints per leg | 7 (Coxa, Coxa_roll, Coxa_yaw, Femur, Femur_roll, Tibia, Tarsus1) |
+| Leg joints | 42 (6 legs × 7 DOF) |
+| Olfactory sensors | 4 (left/right antenna + left/right palp) |
+| Adhesive pads | Enabled |
+| Physics timestep | 0.1 ms (1e-4 s) |
+| Gravity | -9810 mm/s² |
+
+### HybridTurningController
+
+Receives a 2D signal at each 25 ms step:
+
+```python
+obs, reward, terminated, truncated, info = sim.step([left_amp, right_amp])
+# left_amp, right_amp ∈ [0, 1]
+```
+
+Internally: sets CPGNetwork amplitudes (6 coupled oscillators) → tripod gait (Tripod A: LF, RM, RH / Tripod B: RF, LM, LH in antiphase) → stumbling/retraction rules → `physics.step()`.
+
+**Turning**: reducing amplitude on one side slows that tripod → fly curves toward that side.
+
+### Olfactory sensors
+
+`obs["odor_intensity"]` → shape `(1, 4)` → `[left_ant, right_ant, left_palp, right_palp]`
+
+Inverse-square diffusion: `C(r) = peak_intensity / r²`. With `peak_intensity = 500`: ~2 at 15 mm, ~100 at 7 mm, ~1,500 below 2 mm.
+
+---
+
+## Brain-body interface
+
+### DN motor readout
+
+At each 25 ms Brian2 step, DN spikes are read from the spike monitor:
+
+```python
+new_i       = np.asarray(spk_mon.i)[prev_n:]
+left_count  = np.isin(new_i, dn_left_ids).sum()
+right_count = np.isin(new_i, dn_right_ids).sum()
+lr_diff_t   = (left_count - right_count) / (left_count + right_count + ε)
+```
+
+### Control signal
+
+```python
+# Olfactory guidance (primary signal)
+lr_asym   = (right_odor - left_odor) / (total_odor + ε)
+odor_turn = np.tanh(lr_asym * 20.0) * ODOR_TURN_K   # ODOR_TURN_K = 2.5
+
+# Brain modulation (biological variation)
+dn_bias = lr_diff_t * 0.15
+
+turn_bias = odor_turn + dn_bias
+left_amp  = clip(WALK_AMP + turn_bias, 0.1, 1.0)
+right_amp = clip(WALK_AMP - turn_bias, 0.1, 1.0)
+```
+
+`np.tanh` amplifies small odor asymmetries at long range into a decisive turn. The `×0.15` factor ensures the brain modulates without overriding the olfactory signal.
+
+---
+
+## Brain visualization
+
+### Exponential decay glow
+
+```python
+glow *= exp(-FRAME_DT_MS / DECAY_TAU_MS)   # decay τ=80 ms
+glow[spiked_neurons] += 1.0                 # spike → instant boost
+```
+
+### Five layers per frame
+
+| Layer | Neurons | Color | Behavior |
+| --- | --- | --- | --- |
+| Background | 138,617 | Navy `#1a3a5c` | Static, anatomy always visible |
+| LIF | 138,617 | Cyan → white | Glow ∝ individual spike activity |
+| DN | 1,299 | Bright green | Fixed alpha 0.75, vmax=0.25 |
+| Olfactory | 2,279 | Pink/magenta | Stimulated @ 80 Hz in Brian2; alpha ∝ odor intensity |
+| SEZ | 408 | Orange | Stimulated @ 80 Hz in Brian2; alpha ∝ feeding phase |
+
+---
+
+## Navigation and feeding behavior
+
+### Typical timeline
+
+| Physical time | Behavior | Active neurons |
+| --- | --- | --- |
+| 0–2 s | Walking toward food | DN (green) |
+| ~1–2 s | Odor detected, turning | DN + olfactory (pink) |
+| ~2.4 s | Dist < 1.2 mm → feeding | DN + olfactory + SEZ (orange) |
+| ~2.4–2.9 s | Proboscis extends | SEZ (orange) |
+| ~2.9–4.9 s | Active feeding | SEZ (orange) |
+| ~4.9–5.4 s | Proboscis retracts | SEZ (orange) |
+| ~5.4 s | Resumes walking | DN (green) |
+
+### Proboscis (blue probe)
+
+MuJoCo mocap body (blue capsule) positioned between `0/Haustellum` and the food. Orientation computed by quaternion rotation of Z-axis toward `food_pos - haustellum_pos`. Extension follows an S-curve via a normalized timer.
+
+---
+
+## Key parameters
+
+All tunable constants are at the top of `fly_brain_body_simulation.py`:
+
+| Parameter | Default | Effect |
+| --- | --- | --- |
+| `PHYS_DURATION_S` | 10.0 s | Physical + brain duration (identical) |
+| `PLAY_SPEED` | 0.25 | 4× slow motion (10 s physics = 40 s video) |
+| `STIM_RATE_HZ` | 150 Hz | Max Poisson rate for ascending neurons |
+| `FOOD_POS` | [18, 12, 0] mm | Food position (~22 mm from spawn) |
+| `FEED_DIST` | 1.2 mm | Distance threshold to trigger feeding |
+| `FEED_DUR` | 2.0 s | Active feeding phase duration |
+| `ODOR_TURN_K` | 2.5 | Olfactory turn strength |
+| `WALK_AMP` | 0.75 | Base walking amplitude [0–1] |
+| `DECAY_TAU_MS` | 80 ms | Brain glow decay time constant |
+| `DECISION_INTERVAL` | 0.025 s | Control window duration (25 ms) |
+| `PROPRIO_MIN` | 0.15 | Min ascending rate fraction during stillness |
+| `MAX_JOINT_VELOCITY` | 8.0 rad/s | Reference velocity for proprioceptive encoding |
+
+---
+
+## Repository structure
+
+```text
+fly_brain_simulation/
+├── fly_brain_body_simulation.py   # complete pipeline — single entry point
+├── run.bat                        # launch script (auto-detects C++ compiler)
+├── requirements.txt               # Python dependencies
+├── brain_model/
+│   ├── model.py                   # Brian2 LIF network builder (create_model, poi)
+│   ├── Completeness_783.csv       # 138,639-neuron index (FlyWire v783)
+│   ├── Connectivity_783.parquet   # synapse table (~50M rows)
+│   ├── flywire_annotations.tsv    # cell types + soma/pos coordinates
+│   └── descending_neurons.csv     # 1,299 DNs with lateral side labels
+├── simulations/
+│   ├── preview.gif                # README preview
+│   └── vN_brain_body_v4.mp4       # versioned output videos
+├── .env                           # MUJOCO_GL=egl (GPU renderer)
+├── CLAUDE.md                      # Claude Code instructions
+├── README.md                      # French documentation
+└── README.en.md                   # English documentation (this file)
+```
+
+---
+
+## Dependencies
+
+All pre-installed in `wenv310/` (Python 3.10, Windows):
+
+| Package | Version | Role |
+| --- | --- | --- |
+| `brian2` | 2.9.0 | LIF network simulation |
+| `Cython` | 3.2.4 | Brian2 C++ backend compilation |
+| `flygym` | 1.2.1 | NeuroMechFly + MuJoCo |
+| `flybody` | git | MuJoCo fly XML model |
+| `dm_control` | 1.0.27 | DeepMind MuJoCo bindings |
+| `mujoco` | 3.2.7 | Physics engine |
+| `numpy` | 2.0.2 | Matrix computation |
+| `pandas` | 2.3.3 | Connectome loading |
+| `scipy` | 1.15.3 | Quaternions (proboscis orientation) |
+| `matplotlib` | 3.10.8 | Brain panel rendering |
+| `imageio` | 2.37.3 | Video encoding |
+| `pyarrow` | 23.0.1 | Parquet support for connectome data |
+| `python-dotenv` | 1.2.2 | `.env` config |
+
+---
+
+## Scientific basis
+
+**Brain model** — based on [philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model):
+> Shiu et al. (2023). *A leaky integrate-and-fire computational model based on the connectome of the entire adult Drosophila brain.* PLOS Computational Biology.
+> DOI: [10.1371/journal.pcbi.1011280](https://doi.org/10.1371/journal.pcbi.1011280)
+
+**FlyWire v783 connectome** — [flywire.ai](https://flywire.ai):
+> Dorkenwald et al. (2024). *Neuronal wiring diagram of an adult brain.* Nature.
+> DOI: [10.1038/s41586-024-07558-y](https://doi.org/10.1038/s41586-024-07558-y)
+>
+> Schlegel et al. (2024). *Whole-brain annotation and multi-connectome cell typing.* Nature.
+> DOI: [10.1038/s41586-024-07686-5](https://doi.org/10.1038/s41586-024-07686-5)
+
+**NeuroMechFly v2** — [neuromechfly.org](https://neuromechfly.org) | [flygym/flygym](https://github.com/NeuromechFly/flygym):
+> Lobato-Rios et al. (2023). *NeuroMechFly 2.0, a framework for simulating embodied sensorimotor control in adult Drosophila.* Nature Methods.
+> DOI: [10.1038/s41592-024-02497-y](https://doi.org/10.1038/s41592-024-02497-y)
+
+**MuJoCo** — [mujoco.org](https://mujoco.org) | [google-deepmind/mujoco](https://github.com/google-deepmind/mujoco):
+> Todorov et al. (2012). *MuJoCo: A physics engine for model-based control.* IROS.
+> DOI: [10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109)
+
+**Brian2** — [brian2.readthedocs.io](https://brian2.readthedocs.io) | [brian-team/brian2](https://github.com/brian-team/brian2):
+> Stimberg et al. (2019). *Brian 2, an intuitive and efficient neural simulator.* eLife.
+> DOI: [10.7554/eLife.47314](https://doi.org/10.7554/eLife.47314)
+
+---
+
+## Limitations and future work
+
+### 1. VNC not modeled — open research problem
+
+The VNC (*Ventral Nerve Cord*) connectome has been partially mapped. The problem is **integration**: the VNC contains ~70,000 additional neurons including CPGs that produce individual commands for each leg joint. Correctly connecting these to the 87 DOF of the MuJoCo model — respecting neuronal topography and motor types — is an open research problem. We work around it with flygym's CPGNetwork.
+
+**Next step**: integrate the Janelia VNC connectome (*FANC*, 2023) and map annotated motor neurons to their corresponding MuJoCo DOFs.
+
+### 2. Proprioceptive feedback — ✅ implemented
+
+**What we had**: ascending neurons received uniform constant Poisson noise at 150 Hz for the entire 10 s Brian2 run. The brain "heard" the same signal regardless of what the fly was doing. Brian2 and physics ran as two sequential pipelines with no exchange.
+
+**What we changed**:
+
+1. **Interleaved architecture**: instead of a single `net.run(10,000 ms)`, the physics loop now calls `net.run(25 ms)` at each decision. Brian2 and MuJoCo advance in synchrony.
+
+2. **`PoissonInput` → `PoissonGroup`**: `PoissonInput` has a rate fixed at creation. We switched to `PoissonGroup`, whose `rates` attribute can be updated between each 25 ms step.
+
+3. **Velocity → rate encoding**: at each decision:
+
+   ```text
+   r = SENSORY_STIM_RATE × (PROPRIO_MIN + (1 − PROPRIO_MIN) × clamp(velocity / max, 0, 1))
+   ```
+
+   — between `22 Hz` (full immobility) and `150 Hz` (fast walking).
+
+**Observed effect**: during feeding, legs stop moving → ascending rate drops to ~22 Hz → the brain receives a different signal than during walking. DN output is now **causal**.
+
+### 3. Mouth joints removed — flygym model limitation
+
+The MuJoCo model includes proboscis geometry (`0/Haustellum`, `0/Rostrum`, `0/Labrum`) but without joints or actuators. Current approach: mocap body manually positioned via `physics.data.mocap_pos` — no physics, but visually convincing.
+
+### 4. Contextual brain stimulation — ✅ resolved by proprioceptive feedback
+
+With the proprioceptive loop, behavioral modulation now emerges from neural dynamics rather than being applied as a hard-coded rule. During feeding, the ascending rate drops naturally, producing different brain activity.
+
+### 5. Performance — C++ backend enabled ✅
+
+Visual Studio 2022 Community is installed. `run.bat` configures MSVC automatically. Brian2 run: **~5 min** (vs ~50 min with numpy). `run.bat` falls back to numpy automatically if no compiler is found.
+
+---
+
+## Positioning in the open-source ecosystem
+
+To our knowledge, **no public open-source project combines all three layers** of this simulation (full connectome + body physics + closed sensory loop) for *Drosophila*.
+
+| Layer | This project | Public state of the art |
+| --- | --- | --- |
+| LIF brain on real connectome | ✅ 138,639 neurons, 10 s continuous | ✅ philshiu (1 s, no body) |
+| 3D MuJoCo physical body | ✅ NeuroMechFly, 87 DOF | ✅ flygym (no brain) |
+| Olfactory navigation connected to brain | ✅ ORN/PN stimulated @ 80 Hz Brian2 | ❌ flygym (body only) |
+| Feeding behavior (SEZ) | ✅ proboscis + SEZ stimulated @ 80 Hz | ❌ no public project |
+| Real-time circuit visualization | ✅ 5 colored layers | ❌ no public project |
+| Brian2 C++ backend | ✅ Visual Studio 2022, ~5 min/run | ✅ standard on Linux |
+| Closed sensory loop (proprioception) | ✅ body → brain via joint velocity | ❌ no public project |
+
+The loop is now fully closed: the brain influences the body (via DNs), and the body influences the brain (via ascending neuron proprioceptive feedback).
+
+---
+
+## Attributions
+
+This project would not be possible without the work of the following teams.
+
+### FlyWire v783 connectome
+
+- **FlyWire** — [flywire.ai](https://flywire.ai) | [GitHub](https://github.com/seung-lab/cloud-volume)
+  > Dorkenwald et al. (2024). Nature. [10.1038/s41586-024-07558-y](https://doi.org/10.1038/s41586-024-07558-y)
+  > Schlegel et al. (2024). Nature. [10.1038/s41586-024-07686-5](https://doi.org/10.1038/s41586-024-07686-5)
+
+### LIF model on Drosophila connectome
+
+- **philshiu/Drosophila_brain_model** — [github.com/philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model)
+  `brain_model/model.py` is directly derived from this repository.
+  > Shiu et al. (2023). PLOS Computational Biology. [10.1371/journal.pcbi.1011280](https://doi.org/10.1371/journal.pcbi.1011280)
+
+### NeuroMechFly body simulation
+
+- **flygym/flygym** — [github.com/NeuromechFly/flygym](https://github.com/NeuromechFly/flygym) | [neuromechfly.org](https://neuromechfly.org)
+  > Lobato-Rios et al. (2023). Nature Methods. [10.1038/s41592-024-02497-y](https://doi.org/10.1038/s41592-024-02497-y)
+
+- **TuragaLab/flybody** — [github.com/TuragaLab/flybody](https://github.com/TuragaLab/flybody)
+
+### MuJoCo physics engine
+
+- **google-deepmind/mujoco** — [github.com/google-deepmind/mujoco](https://github.com/google-deepmind/mujoco) | [mujoco.org](https://mujoco.org)
+  > Todorov et al. (2012). IROS. [10.1109/IROS.2012.6386109](https://doi.org/10.1109/IROS.2012.6386109)
+
+### Brian2 spiking neural network simulator
+
+- **brian-team/brian2** — [github.com/brian-team/brian2](https://github.com/brian-team/brian2) | [brian2.readthedocs.io](https://brian2.readthedocs.io)
+  > Stimberg et al. (2019). eLife. [10.7554/eLife.47314](https://doi.org/10.7554/eLife.47314)
+
+### Conceptual reference
+
+- **OpenWorm** — [openworm.org](https://openworm.org) | [github.com/openworm](https://github.com/openworm)
+  First open-source complete brain-body simulation (*C. elegans*, 302 neurons).
