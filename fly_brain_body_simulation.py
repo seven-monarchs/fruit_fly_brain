@@ -16,6 +16,7 @@ Output: split-screen video (brain LEFT | fly isometric view RIGHT).
 import sys, re, time
 import numpy as np
 import pandas as pd
+import h5py
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 
@@ -345,6 +346,14 @@ def _update_probe(fraction, head_pos, head_fwd):
         q      = Rotation.from_rotvec(axis * angle).as_quat()
         sim.physics.data.mocap_quat[probe_mocap_id] = [q[3], q[0], q[1], q[2]]
 
+# ── Output versioning (shared by video + data file) ───────────────────────────
+sim_dir  = Path(__file__).parent / "simulations"
+sim_dir.mkdir(exist_ok=True)
+_versions = [int(m.group(1)) for f in sim_dir.glob("v*_*.mp4")
+             if (m := re.match(r"v(\d+)_", f.name))]
+next_v   = max(_versions, default=0) + 1
+print(f"  Output version: v{next_v}")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  7. PHYSICS LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -357,6 +366,15 @@ freeze_qpos = None
 prev_joints = obs.get("joints", None)   # initial joint angles for velocity computation
 if prev_joints is not None:
     prev_joints = np.array(prev_joints, dtype=float)
+
+# Per-step recording arrays (fed into HDF5 after the loop)
+rec_asc_rate   = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_lr_diff    = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_dist       = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_dn_left    = np.zeros(N_DECISIONS_TOTAL, dtype=np.int32)
+rec_dn_right   = np.zeros(N_DECISIONS_TOTAL, dtype=np.int32)
+rec_ctrl_left  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_ctrl_right = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
 
 # Per-decision records for brain overlay (one entry per decision step)
 dec_odor_norm  = []
@@ -489,6 +507,15 @@ for t in range(N_DECISIONS_TOTAL):
             f"  dist={dist:.1f}mm"
             f"  ETA={eta_s/60:.1f}min"
         )
+
+    # ── per-step data recording ───────────────────────────────────────────────
+    rec_asc_rate[t]   = asc_rate
+    rec_lr_diff[t]    = lr_diff_t
+    rec_dist[t]       = dist
+    rec_dn_left[t]    = left_count
+    rec_dn_right[t]   = right_count
+    rec_ctrl_left[t]  = ctrl[0]
+    rec_ctrl_right[t] = ctrl[1]
 
 frames_iso = cam_iso._frames
 frames_top = cam_top._frames
@@ -712,11 +739,6 @@ print(f"  {len(brain_panels)} panels done  [{_elapsed(_t_render)}]")
 # ═══════════════════════════════════════════════════════════════════════════════
 print("Writing video ...")
 _t_video = time.time()
-sim_dir = Path(__file__).parent / "simulations"
-sim_dir.mkdir(exist_ok=True)
-_versions = [int(m.group(1)) for f in sim_dir.glob("v*_*.mp4")
-             if (m := re.match(r"v(\d+)_", f.name))]
-next_v   = max(_versions, default=0) + 1
 out_path = sim_dir / f"v{next_v}_brain_body_v4.mp4"
 
 # Layout:  TOP  = brain panel  (BRAIN_PANEL_W × BRAIN_PANEL_H)
@@ -759,10 +781,96 @@ print(f"  Brain duration   : {BRAIN_DURATION_S:.0f}s  (same — no tiling)")
 print(f"  Video duration   : {n_video_frames / FPS_V:.1f}s  ({n_video_frames} frames @ {FPS_V} fps)")
 print(f"  Resolution       : {total_w} × {total_h} px  (brain top | iso+top-down bottom)")
 print(f"  Circuits shown   : DN (green)  olfactory (pink)  SEZ/feeding (orange)")
-print(f"\n── Timing breakdown ──────────────────────────────────────")
+print(f"\n-- Timing breakdown ------------------------------------------")
 print(f"  Network setup    : {_elapsed(_t_brian)}")
-print(f"  Brain+physics    : {_elapsed(_t_phys)}  (interleaved — {N_DECISIONS_TOTAL}×25ms Brian2 + physics)")
+print(f"  Brain+physics    : {_elapsed(_t_phys)}  (interleaved -- {N_DECISIONS_TOTAL}x25ms Brian2 + physics)")
 print(f"  Glow precompute  : {_elapsed(_t_glow)}")
 print(f"  Brain rendering  : {_elapsed(_t_render)}")
 print(f"  Video write      : {_elapsed(_t_video)}")
 print(f"  TOTAL            : {_elapsed(T_START)}")
+
+# ===============================================================================
+#  11. SAVE SIMULATION DATA  (HDF5 — consumed by generate_plots.py)
+# ===============================================================================
+print("\nSaving simulation data ...")
+_t_data   = time.time()
+data_path = sim_dir / f"v{next_v}_data.h5"
+
+def _circuit_spikes(trains, brian_ids):
+    """Flatten spike trains for given Brian IDs into (times_s, local_idx) arrays."""
+    t_list, i_list = [], []
+    for local_i, bid in enumerate(brian_ids):
+        if bid in trains:
+            st = np.asarray(trains[bid], dtype=np.float32)  # seconds
+            t_list.append(st)
+            i_list.append(np.full(len(st), local_i, dtype=np.int32))
+    times = np.concatenate(t_list) if t_list else np.zeros(0, dtype=np.float32)
+    idxs  = np.concatenate(i_list) if i_list else np.zeros(0, dtype=np.int32)
+    return times, idxs
+
+# Subsample olfactory (2279→300) and draw a general population sample (300),
+# both seeded so plots are reproducible across runs.
+_rng          = np.random.default_rng(42)
+olf_save_ids  = sorted(_rng.choice(olfactory_brian,
+                                   size=min(300, len(olfactory_brian)),
+                                   replace=False).tolist())
+_circuit_set  = set(dn_left_ids + dn_right_ids + dn_both_ids
+                    + olf_save_ids + sez_brian + sensory_idx)
+_pop_pool     = [i for i in range(n_neurons) if i not in _circuit_set]
+pop_sample_ids = sorted(_rng.choice(_pop_pool,
+                                    size=min(300, len(_pop_pool)),
+                                    replace=False).tolist())
+
+with h5py.File(data_path, "w") as f:
+    # -- metadata
+    m = f.create_group("meta")
+    m.attrs["n_steps"]           = N_DECISIONS_TOTAL
+    m.attrs["decision_interval"] = DECISION_INTERVAL
+    m.attrs["brain_duration_s"]  = BRAIN_DURATION_S
+    m.attrs["sensory_stim_rate"] = SENSORY_STIM_RATE
+    m.attrs["timestamp"]         = time.strftime("%Y-%m-%d %H:%M:%S")
+    m.attrs["version"]           = next_v
+
+    # -- behavioral timeseries (one value per 25ms decision step)
+    b = f.create_group("behavior")
+    b.create_dataset("asc_rate",       data=rec_asc_rate)
+    b.create_dataset("lr_diff",        data=rec_lr_diff)
+    b.create_dataset("dist_to_food",   data=rec_dist)
+    b.create_dataset("dn_left_count",  data=rec_dn_left)
+    b.create_dataset("dn_right_count", data=rec_dn_right)
+    b.create_dataset("ctrl_left",      data=rec_ctrl_left)
+    b.create_dataset("ctrl_right",     data=rec_ctrl_right)
+    b.create_dataset("odor_norm",      data=np.array(dec_odor_norm,  dtype=np.float32))
+    b.create_dataset("is_feeding",     data=np.array(dec_is_feeding, dtype=np.float32))
+
+    # -- spike trains per circuit (flat times+idx arrays, gzip compressed)
+    s = f.create_group("spikes")
+    circuits = [
+        ("dn_left",           dn_left_ids,    None),
+        ("dn_right",          dn_right_ids,   None),
+        ("dn_bilateral",      dn_both_ids,    None),
+        ("olfactory",         olf_save_ids,   olf_save_ids),
+        ("sez",               sez_brian,      None),
+        ("ascending",         sensory_idx,    None),
+        ("population_sample", pop_sample_ids, pop_sample_ids),
+    ]
+    for name, ids, save_brian_ids in circuits:
+        grp = s.create_group(name)
+        times, idxs = _circuit_spikes(raw_trains, ids)
+        grp.create_dataset("times", data=times, compression="gzip")
+        grp.create_dataset("idx",   data=idxs,  compression="gzip")
+        grp.attrs["n_neurons"] = len(ids)
+        grp.attrs["n_spikes"]  = len(times)
+        if save_brian_ids is not None:
+            grp.create_dataset("brian_ids",
+                               data=np.array(save_brian_ids, dtype=np.int32))
+
+    # -- soma positions for spatial context (dense-array coordinates)
+    p = f.create_group("positions")
+    for name, d_arr in [("dn", dn_dense), ("olfactory", olfactory_dense), ("sez", sez_dense)]:
+        pg = p.create_group(name)
+        pg.create_dataset("x", data=px[d_arr].astype(np.float32))
+        pg.create_dataset("z", data=pz[d_arr].astype(np.float32))
+
+print(f"  Saved {data_path.name}  [{_elapsed(_t_data)}]")
+print(f"  Run:  python generate_plots.py {data_path}")

@@ -19,8 +19,9 @@ CLAUDE.md
 # Logs
 logs/
 
-# Simulation outputs (videos too large for git — keep preview.gif for README)
+# Simulation outputs (videos too large for git — keep preview.gif and demo.mp4)
 simulations/*.mp4
+!simulations/demo.mp4
 
 # Python
 __pycache__/

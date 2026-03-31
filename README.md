@@ -16,19 +16,21 @@ Le cerveau et le corps partagent une **chronologie continue unique** (pas de bou
 
 1. [Description](#description)
 2. [Sortie vidéo](#sortie-vidéo)
-3. [Installation](#installation)
-4. [Exécution](#exécution)
-5. [Architecture et pipeline](#architecture-et-pipeline)
-6. [Le modèle cérébral — Brian2 LIF](#le-modèle-cérébral--brian2-lif)
-7. [Le modèle corporel — NeuroMechFly](#le-modèle-corporel--neuromechfly)
-8. [Interface cerveau-corps](#interface-cerveau-corps)
-9. [Visualisation cérébrale](#visualisation-cérébrale)
-10. [Comportement de navigation et d'alimentation](#comportement-de-navigation-et-dalimentation)
-11. [Paramètres clés](#paramètres-clés)
-12. [Structure du dépôt](#structure-du-dépôt)
-13. [Dépendances](#dépendances)
-14. [Base scientifique](#base-scientifique)
-15. [Limitations et perspectives](#limitations-et-perspectives)
+3. [Données de simulation et visualisations](#données-de-simulation-et-visualisations)
+4. [Installation](#installation)
+5. [Exécution](#exécution)
+6. [Architecture et pipeline](#architecture-et-pipeline)
+7. [Le modèle cérébral — Brian2 LIF](#le-modèle-cérébral--brian2-lif)
+8. [Le modèle corporel — NeuroMechFly](#le-modèle-corporel--neuromechfly)
+9. [Interface cerveau-corps](#interface-cerveau-corps)
+10. [Visualisation cérébrale](#visualisation-cérébrale)
+11. [Comportement de navigation et d'alimentation](#comportement-de-navigation-et-dalimentation)
+12. [Paramètres clés](#paramètres-clés)
+13. [Structure du dépôt](#structure-du-dépôt)
+14. [Dépendances](#dépendances)
+15. [Base scientifique](#base-scientifique)
+16. [Limitations et perspectives](#limitations-et-perspectives)
+17. [Motivations et directions futures](#motivations-et-directions-futures)
 
 ---
 
@@ -69,6 +71,86 @@ Disposition (1280 × ~840 px) :
 ```
 
 La vidéo tourne à **0,25× la vitesse réelle** — 10 s de physique = 40 s de vidéo.
+
+Un exemple de sortie est disponible dans le dépôt : [`simulations/demo.mp4`](simulations/demo.mp4)
+
+---
+
+## Données de simulation et visualisations
+
+### Format de données — HDF5
+
+À chaque simulation, `fly_brain_body_simulation.py` écrit un fichier `simulations/vN_data.h5` au format **HDF5** (Hierarchical Data Format v5).
+
+**Pourquoi HDF5 ?**
+
+- **Conçu pour les données scientifiques volumineuses** : stocke efficacement des tableaux numpy compressés (trains de spikes, séries temporelles) sans conversion. Un seul fichier contient toutes les données structurées en groupes hiérarchiques (`/behavior`, `/spikes`, `/positions`, `/meta`).
+- **Standard dans les neurosciences computationnelles** : utilisé par NWB (Neurodata Without Borders), Brian2, et la plupart des pipelines d'analyse de pointe — les outils d'analyse existants sont directement compatibles.
+
+Documentation : [docs.hdfgroup.org](https://docs.hdfgroup.org/hdf5/develop/) | Python : [docs.h5py.org](https://docs.h5py.org)
+
+**Contenu du fichier** :
+
+| Groupe | Contenu |
+| --- | --- |
+| `/meta` | Version, durée, paramètres de la simulation |
+| `/behavior` | Séries temporelles par pas de 25 ms : taux ascendant, asymétrie DN, distance nourriture, commandes moteur, odeur, état d'alimentation |
+| `/spikes` | Trains de spikes compressés (gzip) par circuit : DN gauche/droit/bilatéral, SEZ, ascendants, olfactifs (300 échantillonnés), population générale (300) |
+| `/positions` | Coordonnées soma (x, z) pour DN, olfactifs et SEZ |
+
+Pour régénérer les graphiques depuis un fichier existant :
+
+```bat
+wenv310\Scripts\python.exe generate_plots.py simulations/vN_data.h5
+```
+
+Les images sont enregistrées dans `plots/vN/FR/` et `plots/vN/EN/`.
+
+---
+
+### Graphiques d'analyse
+
+#### 01 — Chronologie d'activation des circuits
+
+![Chronologie d'activation des circuits](plots/v33/FR/01_circuit_timeline.png)
+
+Taux de décharge moyen (Hz) pour chaque circuit sur les 10 secondes de simulation. La ligne pointillée blanche (axe droit) montre la distance à la nourriture. Les zones orangées indiquent les épisodes d'alimentation. On observe comment les circuits s'activent séquentiellement : les neurones ascendants encodent le mouvement en continu, les olfactifs s'intensifient à l'approche de la nourriture, et le SEZ s'active lors du contact.
+
+#### 02 — Raster de spikes
+
+![Raster de spikes](plots/v33/FR/02_raster_circuits.png)
+
+Chaque point représente un spike individuel (neurone × temps). Limité à 150 neurones par circuit pour la lisibilité. Permet de voir la variabilité inter-neuronale : certains neurones DN sont très actifs, d'autres silencieux — pattern caractéristique d'un réseau LIF avec connectivité hétérogène.
+
+#### 03 — Neurones descendants vs sortie motrice
+
+![Neurones descendants vs sortie motrice](plots/v33/FR/03_dn_turning_coupling.png)
+
+Trois panneaux superposés : comptage de spikes DN gauche/droit, asymétrie gauche-droite (lr_diff), et amplitudes de commande moteur. Visualise directement le lien cerveau→corps : une asymétrie DN se traduit par un différentiel de commande qui oriente la mouche.
+
+#### 04 — Couplage en boucle fermée
+
+![Couplage en boucle fermée](plots/v33/FR/04_brain_body_coupling.png)
+
+Les deux directions de la boucle fermée sur un seul graphique. Panneau supérieur : taux ascendant modulé par la cinématique des pattes (corps→cerveau). Panneau inférieur : asymétrie DN superposée au différentiel de commande moteur (cerveau→corps). Valide que les deux voies de rétroaction sont actives simultanément.
+
+#### 05 — Carte de chaleur des populations
+
+![Carte de chaleur des populations](plots/v33/FR/05_population_heatmap.png)
+
+Densité de décharge binée à 100 ms pour chaque circuit, représentée en 2D (circuit × temps). La colormap inferno montre les périodes d'activité intense. Donne une vue synthétique de la dynamique temporelle de l'ensemble du réseau d'un seul coup d'œil.
+
+#### 06 — Distribution des taux de décharge
+
+![Distribution des taux de décharge](plots/v33/FR/06_firing_rate_distribution.png)
+
+Histogramme du taux de décharge moyen sur 10 s pour chaque neurone dans les circuits DN, SEZ et olfactifs. Révèle la distribution hétérogène caractéristique d'un réseau LIF réaliste : majorité de neurones peu actifs avec une queue de neurones très actifs.
+
+#### 07 — Gradient olfactif vs circuit olfactif
+
+![Gradient olfactif vs circuit olfactif](plots/v33/FR/07_odor_olfactory_response.png)
+
+Intensité olfactive mesurée par les capteurs physiques (bleu) superposée au taux moyen du circuit olfactif Brian2 (rose). Valide que le signal sensoriel physique se propage bien jusqu'à l'activité neuronale — et que la couche olfactive s'embrase effectivement à l'approche de la source.
 
 ---
 
@@ -251,6 +333,15 @@ Pour revenir au backend numpy (sans compilateur), décommenter dans `fly_brain_b
    Rangée du haut : panneau cerveau (1280×480)
    Rangée du bas : vue iso + vue top (640×H chacune)
    h264, CRF 18, yuv420p
+        │
+        ▼
+[9. Export des données de simulation — simulations/vN_data.h5]
+   Format HDF5 (h5py, gzip) :
+     /behavior  → séries temporelles comportementales (400 pas × 25 ms)
+     /spikes    → trains de spikes par circuit (DN, SEZ, olfactif, ascendants)
+     /positions → coordonnées soma pour chaque circuit
+     /meta      → paramètres et métadonnées de la simulation
+   Consommé par generate_plots.py → plots/vN/FR/ + plots/vN/EN/
 ```
 
 ---
@@ -638,6 +729,73 @@ La combinaison **connectome Drosophila complet (138 639 neurones) → corps phys
 | Boucle sensorielle fermée (proprio) | ✅ corps → cerveau via vitesse articulaire | ❌ pas de projet public |
 
 La boucle est maintenant entièrement fermée : le cerveau influence le corps (via les DNs), et le corps influence le cerveau (via le retour proprioceptif des neurones ascendants). Auparavant, les deux pipelines tournaient séquentiellement sans échange — Brian2 d'abord, physique ensuite. La refonte en architecture entrelacée (400 × 25 ms) a rendu ce retour possible.
+
+---
+
+## Motivations et directions futures
+
+### Origine du projet
+
+Je suis ingénieur logiciel et je vis avec la Sclérose en Plaques. Cette combinaison — un intérêt personnel dans la compréhension de la démyélinisation et la formation technique pour construire des outils computationnels — est la raison directe pour laquelle ce projet existe.
+
+La question initiale était simple : serait-il possible d'assembler des outils open source publiquement disponibles — un vrai connectome, un simulateur physique, un framework de réseau de neurones à décharges — en une simulation cerveau-corps fonctionnelle en boucle fermée, entièrement sur du matériel grand public, sans ressources institutionnelles ? Ce projet est la réponse : une implémentation solo construite sur un ordinateur portable milieu de gamme, intégrant FlyWire, Brian2 et NeuroMechFly en un seul pipeline.
+
+Trois motivations l'ont guidé :
+
+1. **Investissement personnel** — la SEP est la condition que je voulais comprendre de manière computationnelle. La possibilité d'observer comment une perturbation de circuits se propage à travers un vrai connectome, en simulation, est ce qui a lancé le projet.
+2. **Apprendre en construisant** — en tant qu'ingénieur logiciel sans formation formelle en neurosciences, c'était une façon d'apprendre les neurosciences computationnelles en les pratiquant : réseaux à décharges, physique MuJoCo, backends de compilation C++, formats de données de connectome, le tout en même temps.
+3. **Accessibilité** — les simulations neuronales à grande échelle tournent presque toujours sur des clusters de calcul. Un objectif concret de ce projet était de démontrer qu'une simulation biologiquement fondée, à connectome complet, en boucle fermée, peut tourner sur un ordinateur personnel au-dessus de la moyenne (ici : une exécution de ~2,5–3 heures sur un ordinateur portable Windows avec un GPU milieu de gamme et le compilateur C++ de Visual Studio). Aucun supercalculateur, aucun compte institutionnel requis.
+
+---
+
+### Pourquoi la Sclérose en Plaques ne peut pas être modélisée chez *Drosophila*
+
+Malgré la motivation personnelle, la SEP a dû être exclue comme cible de simulation après examen de la biologie.
+
+**L'incompatibilité biologique est fondamentale.** La SEP est une maladie auto-immune démyélinisante spécifique aux vertébrés. Elle dépend des gaines de myéline produites par les oligodendrocytes, de l'immunité adaptative (lymphocytes T et B) et de la rupture de la barrière hémato-encéphalique — aucun de ces éléments n'existe chez *Drosophila*. Les mouches à fruits n'ont pas de myéline.
+
+Ce n'est pas une limitation de modélisation contournable. C'est un fait biologique confirmé par la littérature scientifique :
+
+- Bhatt et al. (2007). *"The fruit fly does not synthesize myelin in its CNS."* EMBO Reports. [PMC2660653](https://pmc.ncbi.nlm.nih.gov/articles/PMC2660653/)
+- Nave & Trapp (2008). *Axon-glial signaling and the glial support of axon function.* Annual Review of Neuroscience. [10.1146/annurev.neuro.31.060407.125533](https://doi.org/10.1146/annurev.neuro.31.060407.125533)
+- Gould & Morrison (2008). *Evolutionary and medical perspectives on the myelin proteome.* Journal of Neuroscience Research. [10.1002/jnr.21647](https://doi.org/10.1002/jnr.21647)
+
+Des recherches bibliographiques approfondies ("FlyWire connectome MS", "Drosophila multiple sclerosis", "fly brain demyelination") n'ont retourné aucun résultat pertinent. *Drosophila* est utilisée pour certaines maladies neurodégénératives (modèles SLA, Alzheimer, Parkinson) mais pas pour la SEP. La recherche sur la SEP utilise des modèles vertébrés — principalement l'EAE murine (encéphalomyélite auto-immune expérimentale) — ou des modèles computationnels de progression de la maladie basés sur l'IRM humaine.
+
+---
+
+### Prochaine étape : vers une simulation du cerveau mammifère
+
+La progression naturelle de ce projet est d'appliquer la même architecture en boucle fermée à des données neuronales de mammifères. Le jeu de données public le plus prometteur à cet effet est **MICrONS** (Machine Intelligence from Cortical Networks), un projet commun de l'Allen Institute, du Baylor College of Medicine et de l'Université de Princeton.
+
+**Ce que MICrONS fournit :**
+> *"Un millimètre cube de cortex visuel de souris, reconstruit à résolution nanométrique — ~100 000 neurones et ~1 milliard de synapses."*
+> — MICrONS Consortium (2021). *Functional connectomics spanning multiple areas of mouse visual cortex.* bioRxiv. [10.1101/2021.07.28.454025](https://doi.org/10.1101/2021.07.28.454025)
+
+Données et outils : [microns-explorer.org](https://www.microns-explorer.org) | [github.com/seung-lab/MICrONS](https://github.com/seung-lab/MICrONS)
+
+**Le défi fondamental — la complexité morphologique :**
+
+Un neurone mammifère n'est pas un neurone d'insecte agrandi. Les différences sont structurelles et quantitatives :
+
+| Propriété | Neurone *Drosophila* (FlyWire) | Neurone cortical de souris (MICrONS) |
+| --- | --- | --- |
+| Arbre dendritique | Simple, compact | Très ramifié, centaines de µm |
+| Synapses par neurone | ~370 en moyenne | ~5 000–10 000 en moyenne |
+| Reconstruction morphologique | ~1 Mo/neurone | ~100–500 Mo/neurone |
+| Taille totale du connectome | ~1 Go (FlyWire) | ~1,3 **pétaoctets** (EM brut MICrONS) |
+| Modélisation compartimentale nécessaire | Non (neurone ponctuel suffisant) | Oui (les dendrites importent computationnellement) |
+
+Le jeu de données MICrONS est un projet à l'échelle du pétaoctet précisément parce que la morphologie de chaque neurone mammifère — son arbre dendritique, la densité des épines, la ramification axonale — doit être reconstruite à résolution nanométrique pour cartographier les synapses avec précision. Un modèle LIF à neurone ponctuel (comme utilisé ici) perd les propriétés computationnelles qui émergent de l'intégration dendritique dans les cellules pyramidales.
+
+**Ce qu'une simulation du cerveau mammifère nécessiterait au-delà de ce projet :**
+
+1. **Modèles de neurones compartimentaux** (p. ex. Hodgkin-Huxley multi-compartiments ou modèles câble simplifiés) plutôt qu'un LIF ponctuel
+2. **Un corps physique** — aucun équivalent de NeuroMechFly n'existe encore pour la souris ; c'est un problème ouvert
+3. **Simulation de sous-graphe sélectif** — même un patch de 1 mm³ à pleine résolution ne peut pas tourner en temps réel sur du matériel grand public ; un sous-échantillonnage ou des modèles de population abstraits seraient nécessaires
+4. **La modélisation des maladies devient possible** — contrairement à *Drosophila*, un modèle cortical de souris peut inclure la myéline, la glie et des perturbations de circuits liées à l'immunité, rendant des conditions comme la SEP, la SLA ou l'épilepsie directement adressables
+
+Cela reste une direction à long terme, dépendante des avancées matérielles (calcul neuromorphique, accès à des clusters GPU) et de la poursuite des publications de données par des projets comme MICrONS, CAVE et le Human Connectome Project.
 
 ---
 

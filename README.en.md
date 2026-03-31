@@ -16,20 +16,22 @@ The brain and body share a **single continuous timeline** (no loop, no replay). 
 
 1. [Description](#description)
 2. [Video output](#video-output)
-3. [Installation](#installation)
-4. [Running](#running)
-5. [Architecture and pipeline](#architecture-and-pipeline)
-6. [The brain model — Brian2 LIF](#the-brain-model--brian2-lif)
-7. [The body model — NeuroMechFly](#the-body-model--neuromechfly)
-8. [Brain-body interface](#brain-body-interface)
-9. [Brain visualization](#brain-visualization)
-10. [Navigation and feeding behavior](#navigation-and-feeding-behavior)
-11. [Key parameters](#key-parameters)
-12. [Repository structure](#repository-structure)
-13. [Dependencies](#dependencies)
-14. [Scientific basis](#scientific-basis)
-15. [Limitations and future work](#limitations-and-future-work)
-16. [Attributions](#attributions)
+3. [Simulation data and visualizations](#simulation-data-and-visualizations)
+4. [Installation](#installation)
+5. [Running](#running)
+6. [Architecture and pipeline](#architecture-and-pipeline)
+7. [The brain model — Brian2 LIF](#the-brain-model--brian2-lif)
+8. [The body model — NeuroMechFly](#the-body-model--neuromechfly)
+9. [Brain-body interface](#brain-body-interface)
+10. [Brain visualization](#brain-visualization)
+11. [Navigation and feeding behavior](#navigation-and-feeding-behavior)
+12. [Key parameters](#key-parameters)
+13. [Repository structure](#repository-structure)
+14. [Dependencies](#dependencies)
+15. [Scientific basis](#scientific-basis)
+16. [Limitations and future work](#limitations-and-future-work)
+17. [Motivations and future directions](#motivations-and-future-directions)
+18. [Attributions](#attributions)
 
 ---
 
@@ -70,6 +72,86 @@ Layout (1280 × ~840 px):
 ```
 
 The video plays at **0.25× real speed** — 10 s of physics = 40 s of video.
+
+A sample output is included in the repository: [`simulations/demo.mp4`](simulations/demo.mp4)
+
+---
+
+## Simulation data and visualizations
+
+### Data format — HDF5
+
+Each simulation run writes a `simulations/vN_data.h5` file in **HDF5** format (Hierarchical Data Format v5).
+
+**Why HDF5?**
+
+- **Built for large scientific datasets**: stores compressed numpy arrays (spike trains, timeseries) efficiently without conversion. A single file holds all data structured in hierarchical groups (`/behavior`, `/spikes`, `/positions`, `/meta`).
+- **Standard in computational neuroscience**: used by NWB (Neurodata Without Borders), Brian2, and most modern analysis pipelines — existing analysis tools are directly compatible.
+
+Documentation: [docs.hdfgroup.org](https://docs.hdfgroup.org/hdf5/develop/) | Python: [docs.h5py.org](https://docs.h5py.org)
+
+**File contents**:
+
+| Group | Contents |
+| --- | --- |
+| `/meta` | Version, duration, simulation parameters |
+| `/behavior` | Per-25ms-step timeseries: ascending rate, DN asymmetry, distance to food, motor commands, odor, feeding state |
+| `/spikes` | gzip-compressed spike trains per circuit: DN left/right/bilateral, SEZ, ascending, olfactory (300 sampled), general population (300) |
+| `/positions` | Soma coordinates (x, z) for DN, olfactory and SEZ neurons |
+
+To regenerate plots from an existing file:
+
+```bat
+wenv310\Scripts\python.exe generate_plots.py simulations/vN_data.h5
+```
+
+Images are saved to `plots/vN/EN/` and `plots/vN/FR/`.
+
+---
+
+### Analysis plots
+
+#### 01 — Circuit activation timeline
+
+![Circuit activation timeline](plots/v33/EN/01_circuit_timeline.png)
+
+Mean firing rate (Hz) for each circuit over the full 10-second simulation. The white dashed line (right axis) shows distance to food. Orange shaded areas mark feeding episodes. Shows how circuits activate sequentially: ascending neurons continuously encode movement, olfactory neurons intensify as the fly approaches food, and SEZ activates on contact.
+
+#### 02 — Spike raster
+
+![Spike raster](plots/v33/EN/02_raster_circuits.png)
+
+Each dot is a single spike (neuron × time). Capped at 150 neurons per circuit for readability. Reveals inter-neuron variability: some DN neurons fire heavily, others are silent — a characteristic pattern of a LIF network with heterogeneous connectivity.
+
+#### 03 — Descending neurons vs motor output
+
+![Descending neurons vs motor output](plots/v33/EN/03_dn_turning_coupling.png)
+
+Three stacked panels: DN left/right spike counts, left-right asymmetry (lr_diff), and motor control amplitudes. Directly visualizes the brain→body link: a DN asymmetry translates into a differential control command that steers the fly.
+
+#### 04 — Closed-loop coupling
+
+![Closed-loop coupling](plots/v33/EN/04_brain_body_coupling.png)
+
+Both directions of the closed loop in a single figure. Top panel: ascending rate modulated by leg kinematics (body→brain). Bottom panel: DN asymmetry overlaid with motor control differential (brain→body). Validates that both feedback pathways are active simultaneously.
+
+#### 05 — Population firing rate heatmap
+
+![Population firing rate heatmap](plots/v33/EN/05_population_heatmap.png)
+
+Spike density binned at 100 ms per circuit, shown as a 2D grid (circuit × time). The inferno colormap highlights periods of intense activity. Gives a synthetic view of the whole network's temporal dynamics at a glance.
+
+#### 06 — Firing rate distribution
+
+![Firing rate distribution](plots/v33/EN/06_firing_rate_distribution.png)
+
+Histogram of mean firing rate over 10 s per neuron in the DN, SEZ and olfactory circuits. Reveals the heterogeneous distribution characteristic of a realistic LIF network: most neurons fire rarely, with a tail of highly active ones.
+
+#### 07 — Odor gradient vs olfactory circuit
+
+![Odor gradient vs olfactory circuit](plots/v33/EN/07_odor_olfactory_response.png)
+
+Odor intensity measured by the physical sensors (blue) overlaid with the mean rate of the Brian2 olfactory circuit (pink). Validates that the physical sensory signal propagates through to neural activity — and that the olfactory layer genuinely lights up as the fly approaches the food source.
 
 ---
 
@@ -251,6 +333,15 @@ To fall back to the numpy backend (no compiler needed), uncomment in `fly_brain_
    Top row: brain panel (1280×480)
    Bottom row: iso view + top-down view (640×H each)
    h264, CRF 18, yuv420p
+        │
+        ▼
+[9. Export simulation data — simulations/vN_data.h5]
+   HDF5 format (h5py, gzip):
+     /behavior  → behavioral timeseries (400 steps × 25 ms)
+     /spikes    → spike trains per circuit (DN, SEZ, olfactory, ascending)
+     /positions → soma coordinates per circuit
+     /meta      → simulation parameters and metadata
+   Consumed by generate_plots.py → plots/vN/EN/ + plots/vN/FR/
 ```
 
 ---
@@ -572,6 +663,73 @@ To our knowledge, **no public open-source project combines all three layers** of
 | Closed sensory loop (proprioception) | ✅ body → brain via joint velocity | ❌ no public project |
 
 The loop is now fully closed: the brain influences the body (via DNs), and the body influences the brain (via ascending neuron proprioceptive feedback).
+
+---
+
+## Motivations and future directions
+
+### Origin of the project
+
+I am a software engineer living with Multiple Sclerosis. That combination — a personal stake in understanding demyelinating disease and the technical background to build computational tools — is the direct reason this project exists.
+
+The initial question was straightforward: could publicly available open-source tools — a real connectome, a physics simulator, a spiking network framework — be assembled into a working closed-loop brain-body simulation, entirely on consumer hardware, without institutional resources? This project is the answer: a solo implementation built on a mid-range laptop, integrating FlyWire, Brian2, and NeuroMechFly into a single pipeline.
+
+Three motivations drove it:
+
+1. **Personal investment** — MS is the condition I wanted to understand computationally. The possibility of watching how circuit disruption propagates through a real connectome, in simulation, was the hook that started everything.
+2. **Learning by building** — as a software engineer with no formal neuroscience background, this was a way to learn computational neuroscience by doing it: spiking networks, MuJoCo physics, C++ compilation backends, connectome data formats, all at once.
+3. **Accessibility** — large-scale neural simulations are almost always run on compute clusters. A concrete goal of this project was to demonstrate that a biologically grounded, full-connectome, closed-loop simulation can run on an above-average personal computer (here: a ~2.5–3 hour run on a Windows laptop with a mid-range GPU and Visual Studio's C++ compiler). No supercomputer, no institutional account required.
+
+---
+
+### Why Multiple Sclerosis cannot be modelled in Drosophila
+
+Despite the personal motivation, MS had to be ruled out as a simulation target after reviewing the biology.
+
+**The biological mismatch is fundamental.** MS is a vertebrate-specific autoimmune demyelinating disease. It depends on myelin sheaths produced by oligodendrocytes, adaptive immunity (T-cells, B-cells), and blood-brain barrier disruption — none of which exist in *Drosophila*. Fruit flies have no myelin.
+
+This is not a modelling limitation that could be worked around. It is a hard biological fact confirmed by peer-reviewed literature:
+
+- Bhatt et al. (2007). *"The fruit fly does not synthesize myelin in its CNS."* EMBO Reports. [PMC2660653](https://pmc.ncbi.nlm.nih.gov/articles/PMC2660653/)
+- Nave & Trapp (2008). *Axon-glial signaling and the glial support of axon function.* Annual Review of Neuroscience. [10.1146/annurev.neuro.31.060407.125533](https://doi.org/10.1146/annurev.neuro.31.060407.125533)
+- Gould & Morrison (2008). *Evolutionary and medical perspectives on the myelin proteome.* Journal of Neuroscience Research. [10.1002/jnr.21647](https://doi.org/10.1002/jnr.21647)
+
+Extensive literature searches ("FlyWire connectome MS", "Drosophila multiple sclerosis", "fly brain demyelination") returned zero relevant results. *Drosophila* is used for some neurodegenerative conditions (ALS, Alzheimer's, Parkinson's models) but not for MS. MS research uses vertebrate models — primarily rodent EAE (experimental autoimmune encephalomyelitis) — or human MRI/computational disease-progression models.
+
+---
+
+### Next step: towards a mammalian brain simulation
+
+The natural progression from this project is to apply the same closed-loop architecture to mammalian neural data. The most promising public dataset for this is **MICrONS** (Machine Intelligence from Cortical Networks), a joint project from the Allen Institute, Baylor College of Medicine, and Princeton University.
+
+**What MICrONS provides:**
+> *"A cubic millimeter of mouse visual cortex, reconstructed at nanometer resolution — ~100,000 neurons and ~1 billion synapses."*
+> — MICrONS Consortium (2021). *Functional connectomics spanning multiple areas of mouse visual cortex.* bioRxiv. [10.1101/2021.07.28.454025](https://doi.org/10.1101/2021.07.28.454025)
+
+Data and tooling: [microns-explorer.org](https://www.microns-explorer.org) | [github.com/seung-lab/MICrONS](https://github.com/seung-lab/MICrONS)
+
+**The fundamental challenge — morphological complexity:**
+
+A mammalian neuron is not a scaled-up insect neuron. The differences are structural and quantitative:
+
+| Property | *Drosophila* neuron (FlyWire) | Mouse cortical neuron (MICrONS) |
+| --- | --- | --- |
+| Dendritic tree | Simple, compact | Highly branched, 100s of µm |
+| Synapses per neuron | ~370 avg | ~5,000–10,000 avg |
+| Morphological reconstruction | ~1 MB/neuron | ~100–500 MB/neuron |
+| Total connectome size | ~1 GB (FlyWire) | ~1.3 **petabytes** (raw MICrONS EM) |
+| Compartment modelling needed | No (point neuron sufficient) | Yes (dendrites matter computationally) |
+
+The MICrONS dataset is a petabyte-scale project precisely because each mammalian neuron's morphology — its dendritic arbor, spine density, axonal branching — must be reconstructed at nanometer resolution to map synapses accurately. A point-neuron LIF model (as used here) loses the computational properties that arise from dendritic integration in pyramidal cells.
+
+**What a mammalian simulation would require beyond this project:**
+
+1. **Compartmental neuron models** (e.g. multi-compartment Hodgkin-Huxley or simplified cable models) rather than single-point LIF
+2. **A physical body** — no equivalent of NeuroMechFly exists yet for mouse; this is an open problem
+3. **Selective subgraph simulation** — even a 1 mm³ patch at full resolution cannot run in real time on consumer hardware; subsampling or abstract population models would be needed
+4. **Disease modelling becomes possible** — unlike *Drosophila*, a mouse cortical model can include myelin, glia, and immune-related circuit disruption, making conditions like MS, ALS, or epilepsy directly addressable
+
+This remains a long-term direction, dependent on both hardware advances (neuromorphic computing, GPU cluster access) and continued data releases from projects like MICrONS, CAVE, and the Human Connectome Project.
 
 ---
 
