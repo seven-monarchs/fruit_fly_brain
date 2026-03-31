@@ -1,0 +1,39 @@
+# Virtual environments
+wenv*/
+venv*/
+env/
+.venv/
+*.venv
+.env3*/
+.env[0-9]*/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Git and IDE
+.git/
+.claude/
+.gitignore
+
+# Docs
+*.md
+*.bat
+
+# Outputs (generated at runtime — use volumes)
+logs/
+simulations/
+plots/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Tests (not needed inside the container)
+tests/

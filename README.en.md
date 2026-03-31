@@ -235,6 +235,26 @@ If Brian2 compiles with Cython (first run ~30 s) and prints `SUCCESS C++ BACKEND
 
 ## Running
 
+### Option A — Docker (any OS, no local setup required)
+
+If you don't have Docker, install Docker Desktop first: [docs.docker.com/get-started/get-docker](https://docs.docker.com/get-started/get-docker/)
+
+```bash
+# Build the image (one time, ~5–10 min)
+docker build -t fly-brain-sim .
+
+# Run — outputs are written to your local simulations/, logs/, plots/
+docker run --rm \
+  -v $(pwd)/simulations:/app/simulations \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/plots:/app/plots \
+  fly-brain-sim
+```
+
+On Windows PowerShell replace `$(pwd)` with `${PWD}`. Brian2 uses GCC inside the container — no Visual Studio needed. First run adds ~13 min for Cython compilation; to persist the cache across runs add `-v brian2-cache:/root/.cython` to the command.
+
+### Option B — Windows native (recommended for development)
+
 **Recommended — use the launch script** (automatically configures the C++ compiler):
 
 ```bat

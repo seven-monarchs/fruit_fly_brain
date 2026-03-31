@@ -234,6 +234,26 @@ Si Brian2 compile avec Cython (premier run ~30 s) et affiche `SUCCESS C++ BACKEN
 
 ## Exécution
 
+### Option A — Docker (tous systèmes, aucune installation locale requise)
+
+Si Docker n'est pas installé : [docs.docker.com/get-started/get-docker](https://docs.docker.com/get-started/get-docker/)
+
+```bash
+# Construire l'image (une seule fois, ~5–10 min)
+docker build -t fly-brain-sim .
+
+# Lancer — les résultats sont écrits dans simulations/, logs/, plots/ locaux
+docker run --rm \
+  -v $(pwd)/simulations:/app/simulations \
+  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/plots:/app/plots \
+  fly-brain-sim
+```
+
+Sous Windows PowerShell, remplacer `$(pwd)` par `${PWD}`. Brian2 utilise GCC dans le conteneur — Visual Studio n'est pas nécessaire. Le premier lancement ajoute ~13 min de compilation Cython ; pour conserver le cache entre les runs, ajouter `-v brian2-cache:/root/.cython` à la commande.
+
+### Option B — Windows natif (recommandé pour le développement)
+
 **Méthode recommandée — utiliser le script de lancement** (configure automatiquement le compilateur C++) :
 
 ```bat

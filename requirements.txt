@@ -27,6 +27,7 @@ pillow==12.1.1
 
 # ── Data formats ──────────────────────────────────────────────────────────────
 pyarrow==23.0.1         # parquet support for connectome data
+h5py==3.14.0            # HDF5 data export
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.2.2
