@@ -795,7 +795,7 @@ Le jeu de données MICrONS est un projet à l'échelle du pétaoctet préciséme
 3. **Simulation de sous-graphe sélectif** — même un patch de 1 mm³ à pleine résolution ne peut pas tourner en temps réel sur du matériel grand public ; un sous-échantillonnage ou des modèles de population abstraits seraient nécessaires
 4. **La modélisation des maladies devient possible** — contrairement à *Drosophila*, un modèle cortical de souris peut inclure la myéline, la glie et des perturbations de circuits liées à l'immunité, rendant des conditions comme la SEP, la SLA ou l'épilepsie directement adressables
 
-Cela reste une direction à long terme, dépendante des avancées matérielles (calcul neuromorphique, accès à des clusters GPU) et de la poursuite des publications de données par des projets comme MICrONS, CAVE et le Human Connectome Project.
+L'objectif reste le même que pour ce projet : faire tourner la simulation sur un ordinateur personnel. La voie n'est pas d'attendre un cluster — c'est le sous-échantillonnage intelligent, des approximations neuronales ponctuelles efficaces du calcul dendritique, et l'extraction de sous-graphes sélectifs depuis des jeux de données publics comme MICrONS, CAVE et le Human Connectome Project. Les données sont déjà publiques. Le défi est de rendre la simulation réalisable à l'échelle grand public.
 
 ---
 

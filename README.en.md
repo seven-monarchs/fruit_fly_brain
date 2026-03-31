@@ -729,7 +729,7 @@ The MICrONS dataset is a petabyte-scale project precisely because each mammalian
 3. **Selective subgraph simulation** — even a 1 mm³ patch at full resolution cannot run in real time on consumer hardware; subsampling or abstract population models would be needed
 4. **Disease modelling becomes possible** — unlike *Drosophila*, a mouse cortical model can include myelin, glia, and immune-related circuit disruption, making conditions like MS, ALS, or epilepsy directly addressable
 
-This remains a long-term direction, dependent on both hardware advances (neuromorphic computing, GPU cluster access) and continued data releases from projects like MICrONS, CAVE, and the Human Connectome Project.
+The goal remains the same as for this project: make it run on a personal computer. The path there is not waiting for a cluster — it is smart subsampling, efficient point-neuron approximations of dendritic computation, and selective subgraph extraction from public datasets like MICrONS, CAVE, and the Human Connectome Project. The data is already public. The challenge is making the simulation tractable at consumer scale.
 
 ---
 
