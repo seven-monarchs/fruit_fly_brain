@@ -19,9 +19,16 @@ CLAUDE.md
 # Logs
 logs/
 
-# Simulation outputs (videos too large for git — keep preview.gif and demo.mp4)
-simulations/*.mp4
+# Simulation outputs (too large for git — keep only demo.mp4)
+**/*.mp4
 !simulations/demo.mp4
+
+# flyvis pretrained weights and flywire connectome (large binaries, not source code)
+simulation_data/flyvis_pretrained_weights/
+simulation_data/flywire_connectome_v783/
+
+# Scratch notes and test output
+scratch/
 
 # Python
 __pycache__/

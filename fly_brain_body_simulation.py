@@ -13,10 +13,11 @@ Brain panel layers (color-coded by circuit):
 Output: split-screen video (brain LEFT | fly isometric view RIGHT).
 """
 
-import sys, re, time
+import sys, re, time, importlib.util, heapq
 import numpy as np
 import pandas as pd
 import h5py
+import torch
 from pathlib import Path
 from scipy.spatial.transform import Rotation
 
@@ -97,7 +98,7 @@ N_BRAIN_DECISIONS          = int(BRAIN_DURATION_S / DECISION_INTERVAL)   # 400 (
 
 WALK_AMP     = 0.75
 ODOR_TURN_K  = 2.5
-FOOD_POS     = np.array([18.0, 12.0, 0.0])
+FOOD_POS     = np.array([20.0, 2.0, 0.0])
 FEED_DIST    = 1.2     # mm — proximity trigger
 FEED_DUR     = 2.0     # s
 
@@ -111,6 +112,107 @@ DOT_LIF_SIZE   = 14.0    # LIF spike glow (white/cyan layer)
 DOT_DN_SIZE    = 20.0    # descending-neuron highlight (green)
 DOT_OLF_SIZE   = 20.0    # olfactory highlight (blue)
 DOT_SEZ_SIZE   = 20.0    # SEZ/feeding highlight (orange)
+DOT_VIS_SIZE   = 20.0    # visual/lamina highlight (yellow)
+
+VIS_STIM_MIN_HZ = 20.0   # lamina firing rate at zero luminance
+VIS_STIM_MAX_HZ = 150.0  # lamina firing rate at full luminance (float32 1.0)
+
+# Visual obstacle avoidance — flyvis connectome-constrained T5 motion detector
+# Lappalainen et al. 2024 (Nature): R1-R8 -> L1-L5 -> Mi/Tm -> T4/T5 (65 cell types)
+# T5 = OFF-pathway motion detector; asymmetry between eyes drives avoidance turn
+FLYVIS_T5_GAIN  = 0.5    # scale T5 asymmetry to turn units (gentle — prevents oversteer near wall)
+FLYVIS_DECAY    = 0.5    # exponential decay of persisted bias per step
+FLYVIS_BIAS_MAX = 0.15   # clamp so reflex assists odor without dominating
+FLYVIS_DT       = 25e-3  # integration dt (one frame = one 25ms decision step)
+
+
+def _load_retina_mapper():
+    """Load flygym RetinaMapper via importlib to avoid MuJoCo rendering reinit."""
+    spec = importlib.util.spec_from_file_location(
+        'flygym.vision.retina',
+        Path(__file__).parent / 'wenv310/lib/site-packages/flygym/vision/retina.py')
+    retina_mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault('flygym.vision.retina', retina_mod)
+    sys.modules.setdefault('flygym.vision', retina_mod)
+    spec.loader.exec_module(retina_mod)
+    spec2 = importlib.util.spec_from_file_location(
+        'vision_network',
+        Path(__file__).parent / 'wenv310/lib/site-packages/flygym/examples/vision/vision_network.py')
+    vn_mod = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(vn_mod)
+    return vn_mod.RetinaMapper()
+
+# ── Channeled odor grid (Dijkstra path-distance field) ───────────────────────
+# Walls block straight-line diffusion; odor routes through physical corridor.
+# Wall 1: x=8,  y=-15..10  gap at y>=10  (north)
+# Wall 2: x=14, y=6..16    gap at y<=6   (south into tunnel)
+GRID_RES         = 0.5          # mm per cell
+X_MIN, X_MAX     = -1.0, 22.0
+Y_MIN, Y_MAX     = -16.0, 18.0
+ANT_SEP          = 0.5          # mm, lateral antenna separation
+
+# Walls as (x_center, y_center, x_half, y_half) in mm for odor grid
+_ODOR_WALL_RECTS = [
+    (8.0,  -2.5, 0.4, 12.5),  # Wall 1: y=-15..10, gap y>=10
+    (14.0, 11.0, 0.4,  5.0),  # Wall 2: y=6..16,   gap y<=6
+]
+
+
+def build_odor_field(food_xy, wall_rects=_ODOR_WALL_RECTS, grid_res=GRID_RES,
+                     x_range=(X_MIN, X_MAX), y_range=(Y_MIN, Y_MAX), peak=500.0):
+    """Dijkstra shortest walkable path from food. Returns (odor_field, xs, ys, blocked)."""
+    xs = np.arange(x_range[0], x_range[1] + grid_res * 0.5, grid_res)
+    ys = np.arange(y_range[0], y_range[1] + grid_res * 0.5, grid_res)
+    NX, NY = len(xs), len(ys)
+
+    blocked = np.zeros((NX, NY), dtype=bool)
+    for (wx, wy, whx, why) in wall_rects:
+        ix_lo = max(0, int(np.floor((wx - whx - x_range[0]) / grid_res)))
+        ix_hi = min(NX-1, int(np.ceil( (wx + whx - x_range[0]) / grid_res)))
+        iy_lo = max(0, int(np.floor((wy - why - y_range[0]) / grid_res)))
+        iy_hi = min(NY-1, int(np.ceil( (wy + why - y_range[0]) / grid_res)))
+        blocked[ix_lo:ix_hi+1, iy_lo:iy_hi+1] = True
+
+    fx = int(np.clip(round((food_xy[0] - x_range[0]) / grid_res), 0, NX-1))
+    fy = int(np.clip(round((food_xy[1] - y_range[0]) / grid_res), 0, NY-1))
+
+    INF  = 1e9
+    dist = np.full((NX, NY), INF)
+    dist[fx, fy] = 0.0
+    pq   = [(0.0, fx, fy)]
+    moves = [(-1,0,1.0),(1,0,1.0),(0,-1,1.0),(0,1,1.0),
+             (-1,-1,1.414),(-1,1,1.414),(1,-1,1.414),(1,1,1.414)]
+    while pq:
+        d, ix, iy = heapq.heappop(pq)
+        if d > dist[ix, iy] + 1e-9:
+            continue
+        for ddx, ddy, cost in moves:
+            nx2, ny2 = ix + ddx, iy + ddy
+            if 0 <= nx2 < NX and 0 <= ny2 < NY and not blocked[nx2, ny2]:
+                nd = d + cost * grid_res
+                if nd < dist[nx2, ny2]:
+                    dist[nx2, ny2] = nd
+                    heapq.heappush(pq, (nd, nx2, ny2))
+
+    safe_dist  = np.maximum(dist, 1.0)
+    odor_field = np.where(dist < INF, peak / safe_dist**2, 0.0)
+    return odor_field, xs, ys, blocked
+
+
+def lookup_odor(px, py, odor_field, xs, ys):
+    """Bilinear interpolation of odor_field at world position (px, py)."""
+    px   = float(np.clip(px, xs[0], xs[-1]))
+    py   = float(np.clip(py, ys[0], ys[-1]))
+    rx   = xs[1] - xs[0];  ry = ys[1] - ys[0]
+    ix   = (px - xs[0]) / rx;  iy = (py - ys[0]) / ry
+    ix0  = int(ix);  iy0 = int(iy)
+    ix1  = min(ix0+1, len(xs)-1);  iy1 = min(iy0+1, len(ys)-1)
+    fx   = ix - ix0;  fy = iy - iy0
+    return (odor_field[ix0, iy0]*(1-fx)*(1-fy) +
+            odor_field[ix1, iy0]*fx*(1-fy) +
+            odor_field[ix0, iy1]*(1-fx)*fy +
+            odor_field[ix1, iy1]*fx*fy)
+
 
 BRAIN_PANEL_W  = 1280   # spans full output width (both fly panels combined)
 BRAIN_PANEL_H  = 480
@@ -176,6 +278,18 @@ if dn_csv.exists():
 dn_all_ids = dn_left_ids + dn_right_ids + dn_both_ids
 print(f"  DNs: {len(dn_left_ids)} L / {len(dn_right_ids)} R / {len(dn_both_ids)} bilateral")
 
+# Visual input — lamina→medulla (LA>ME) neurons: first connectome synapse of photoreceptors.
+# Split left/right so each eye drives its ipsilateral optic lobe.
+_lam = df_ann[df_ann["cell_class"] == "LA>ME"].copy()
+_lam = _lam[_lam["brian_idx"].notna()]
+_lam["brian_idx"] = _lam["brian_idx"].astype(int)
+_lam_side = _lam["side"].astype(str).str.strip().str.lower()
+lam_left_ids  = _lam[_lam_side == "left"] ["brian_idx"].tolist()
+lam_right_ids = _lam[_lam_side == "right"]["brian_idx"].tolist()
+lam_both_ids  = _lam[~_lam_side.isin(["left", "right"])]["brian_idx"].tolist()
+lam_all_ids   = lam_left_ids + lam_right_ids + lam_both_ids
+print(f"  LA>ME lamina neurons: {len(lam_left_ids)} L / {len(lam_right_ids)} R / {len(lam_both_ids)} bilateral")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  2. SOMA POSITIONS (frontal view)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -206,9 +320,11 @@ def _to_dense(brian_ids):
 olfactory_dense = _to_dense(olfactory_brian)
 sez_dense       = _to_dense(sez_brian)
 dn_dense        = _to_dense(dn_all_ids)
+lam_dense       = _to_dense(lam_all_ids)
 print(f"  ● Olfactory (positioned): {len(olfactory_dense):,}")
 print(f"  ● SEZ/feeding (positioned): {len(sez_dense):,}")
 print(f"  ● DN (positioned): {len(dn_dense):,}")
+print(f"  ● LA>ME lamina/visual (positioned): {len(lam_dense):,}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  3. BRIAN2 — create network (will run interleaved with physics, 25 ms/step)
@@ -249,7 +365,34 @@ for bidx in sensory_idx:          # no refractory period for Poisson targets
 # ── Circuit neurons (olfactory + SEZ): fixed rate via poi()
 poi_circuit, neu = poi(neu, [], circuit_stim_idx, params)  # exc=[] — only exc2
 
-net = Network(neu, syn, spk_mon, asc_group, asc_syn, *poi_circuit)
+# ── Visual neurons (LA>ME lamina): PoissonGroup driven by compound-eye luminance
+# Left eye  → lam_left_ids  (ipsilateral optic lobe)
+# Right eye → lam_right_ids (ipsilateral optic lobe)
+# Bilateral / unassigned neurons receive average of both eyes.
+n_lam_l = len(lam_left_ids)
+n_lam_r = len(lam_right_ids)
+n_lam_b = len(lam_both_ids)
+
+vis_group_l = PoissonGroup(N=max(n_lam_l, 1), rates=VIS_STIM_MIN_HZ * Hz)
+vis_group_r = PoissonGroup(N=max(n_lam_r, 1), rates=VIS_STIM_MIN_HZ * Hz)
+vis_group_b = PoissonGroup(N=max(n_lam_b, 1), rates=VIS_STIM_MIN_HZ * Hz)
+
+def _vis_syn(src, targets):
+    s = Synapses(src, neu, 'w : volt', on_pre='v += w', delay=params['t_dly'])
+    s.connect(i=np.arange(len(targets)), j=np.array(targets))
+    s.w = params['w_syn'] * params['f_poi']
+    return s
+
+vis_syn_l = _vis_syn(vis_group_l, lam_left_ids)  if n_lam_l else None
+vis_syn_r = _vis_syn(vis_group_r, lam_right_ids) if n_lam_r else None
+vis_syn_b = _vis_syn(vis_group_b, lam_both_ids)  if n_lam_b else None
+
+_vis_objects = [vis_group_l, vis_group_r, vis_group_b]
+if vis_syn_l: _vis_objects.append(vis_syn_l)
+if vis_syn_r: _vis_objects.append(vis_syn_r)
+if vis_syn_b: _vis_objects.append(vis_syn_b)
+
+net = Network(neu, syn, spk_mon, asc_group, asc_syn, *poi_circuit, *_vis_objects)
 print(f"  Network ready ({n_neurons:,} neurons)  [{_elapsed(_t_brian)}]")
 print(f"  Will run interleaved: {N_DECISIONS_TOTAL} × {int(DECISION_INTERVAL*1000)} ms steps")
 
@@ -259,7 +402,7 @@ print(f"  Will run interleaved: {N_DECISIONS_TOTAL} × {int(DECISION_INTERVAL*10
 print("\nBuilding simulation ...")
 arena = OdorArena(
     odor_source=FOOD_POS[np.newaxis],
-    peak_odor_intensity=np.array([[500.0, 0.0]]),
+    peak_odor_intensity=np.array([[1.0, 0.0]]),   # dummy - channeled odor handles steering
     diffuse_func=lambda x: x**-2,
     marker_colors=[],
 )
@@ -271,12 +414,32 @@ food_body = arena.root_element.worldbody.add(
 food_body.add("geom", type="sphere", size=[0.55],
               rgba=[0.72, 0.38, 0.08, 0.92], contype=0, conaffinity=0)
 
+
 # Proboscis probe (bright blue capsule)
 probe_body = arena.root_element.worldbody.add(
     "body", name="proboscis_probe", pos=[0, 0, 50], mocap=True
 )
 probe_body.add("geom", type="capsule", size=[0.055, 0.35],
                rgba=[0.1, 0.5, 1.0, 1.0], contype=0, conaffinity=0)
+
+# Zigzag / tunnel layout - two walls create a corridor the fly must navigate through.
+# Wall 1: x=8,  y=-15..10  gap at y>=10  (fly goes north over this wall)
+# Wall 2: x=14, y=6..16    gap at y<=6   (fly comes south through tunnel gap)
+# Tunnel: x=8..14, y=6..10 (corridor between the two walls)
+# solimp/solref softening prevents BADQACC with adhesion actuators on tarsi.
+# base z=-1mm (pos_z=3.0, half=4.0) truly blocks fly body z=-0.36..-0.07mm.
+arena.root_element.worldbody.add(
+    "geom", name="wall1",
+    type="box", pos=[8.0, -2.5, 3.0], size=[0.3, 12.5, 4.0],
+    rgba=[0.15, 0.10, 0.05, 1.0], contype=1, conaffinity=1,
+    solimp="0.9 0.999 0.001 0.5 2", solref="0.02 1",
+)
+arena.root_element.worldbody.add(
+    "geom", name="wall2",
+    type="box", pos=[14.0, 11.0, 3.0], size=[0.3, 5.0, 4.0],
+    rgba=[0.15, 0.10, 0.05, 1.0], contype=1, conaffinity=1,
+    solimp="0.9 0.999 0.001 0.5 2", solref="0.02 1",
+)
 
 contact_sensor_placements = [
     f"{leg}{seg}"
@@ -285,9 +448,10 @@ contact_sensor_placements = [
 ]
 fly = Fly(
     spawn_pos=(0, 0, 0.2),
-    spawn_orientation=(0, 0, -1.2),
+    spawn_orientation=(0, 0, 0.588),
     contact_sensor_placements=contact_sensor_placements,
     enable_olfaction=True, enable_adhesion=True, draw_adhesion=False,
+    enable_vision=True,
 )
 cam_iso = YawOnlyCamera(
     attachment_point=fly.model.worldbody,
@@ -303,8 +467,24 @@ cam_top = YawOnlyCamera(
     timestamp_text=False, play_speed_text=False,
     play_speed=PLAY_SPEED, fps=FPS_V,
 )
+# Third-person "cat cam" — 4mm behind, 3.5mm above lower back, yaws with fly.
+# Parameters confirmed in tests/test_back_camera.py.
+cam_back = YawOnlyCamera(
+    attachment_point=fly.model.worldbody,
+    camera_name="camera_back_close",
+    targeted_fly_names=fly.name,
+    timestamp_text=False, play_speed_text=False,
+    play_speed=PLAY_SPEED, fps=FPS_V,
+    camera_parameters={
+        "class": "nmf",
+        "mode":  "track",
+        "ipd":   0.068,
+        "pos":   [-4, 0, 3.5],
+        "euler": [1.1, 0.0, -1.57],
+    },
+)
 sim = HybridTurningController(
-    fly=fly, cameras=[cam_iso, cam_top], arena=arena, timestep=PHYSICS_TIMESTEP,
+    fly=fly, cameras=[cam_iso, cam_top, cam_back], arena=arena, timestep=PHYSICS_TIMESTEP,
 )
 obs, _ = sim.reset()
 
@@ -355,7 +535,43 @@ next_v   = max(_versions, default=0) + 1
 print(f"  Output version: v{next_v}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  7. PHYSICS LOOP
+#  7. FLYVIS VISUAL NETWORK — load once, carry state across the loop
+# ═══════════════════════════════════════════════════════════════════════════════
+print("\nLoading flyvis pretrained network (Lappalainen et al. 2024) ...")
+import flyvis
+from flyvis import NetworkView
+
+_nv         = NetworkView(flyvis.results_dir / 'flow/0000/000')
+_fv_network = _nv.init_network(checkpoint='best')
+_fv_rm      = _load_retina_mapper()
+_fv_t5a_idx = _fv_network.stimulus.layer_index['T5a']
+_fv_t5b_idx = _fv_network.stimulus.layer_index['T5b']
+
+# Compute initial steady state (1 s of grey input = 40 frames at 25 ms)
+print("  Computing flyvis steady state (1s grey) ...")
+_fv_network.eval()
+for _p in _fv_network.parameters():
+    _p.requires_grad = False
+_grey_t = torch.ones((2, 1, 1, 721), dtype=torch.float32) * 0.5
+with torch.no_grad():
+    _fv_network.stimulus.zero(2, 1)
+    _fv_network.stimulus.add_input(_grey_t)
+    _fv_state = _fv_network.forward(_fv_network.stimulus(), FLYVIS_DT, state=None, as_states=True)[-1]
+    for _ in range(39):
+        _fv_network.stimulus.zero(2, 1)
+        _fv_network.stimulus.add_input(_grey_t)
+        _fv_state = _fv_network.forward(_fv_network.stimulus(), FLYVIS_DT, state=_fv_state, as_states=True)[-1]
+print("  flyvis ready. T5a/T5b cells:", len(_fv_t5a_idx), "/", len(_fv_t5b_idx))
+
+# ── Pre-compute channeled odor field (Dijkstra path-distance) ────────────────
+print("\nBuilding channeled odor field (Dijkstra) ...")
+_odor_field, _odor_xs, _odor_ys, _odor_blocked = build_odor_field(FOOD_POS[:2])
+print(f"  Grid: {len(_odor_xs)} x {len(_odor_ys)} cells at {GRID_RES}mm/cell")
+print(f"  Odor at spawn (0,0): {lookup_odor(0.0, 0.0, _odor_field, _odor_xs, _odor_ys):.3f}")
+print(f"  Odor at food  ({FOOD_POS[0]},{FOOD_POS[1]}): {lookup_odor(FOOD_POS[0], FOOD_POS[1], _odor_field, _odor_xs, _odor_ys):.1f}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  8. PHYSICS LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 print(f"\nRunning {PHYS_DURATION_S:.0f}s interleaved brain+physics ...")
 print(f"  {N_DECISIONS_TOTAL} × {int(DECISION_INTERVAL*1000)} ms steps  |  proprio feedback: ascending @ {SENSORY_STIM_RATE} Hz (dynamic)")
@@ -375,10 +591,31 @@ rec_dn_left    = np.zeros(N_DECISIONS_TOTAL, dtype=np.int32)
 rec_dn_right   = np.zeros(N_DECISIONS_TOTAL, dtype=np.int32)
 rec_ctrl_left  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
 rec_ctrl_right = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_vis_left   = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_vis_right  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_loom_sig_l = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_loom_sig_r = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_loom_bias  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_fly_x      = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_fly_y      = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_fly_head   = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_odor_left  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+rec_odor_right = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
 
 # Per-decision records for brain overlay (one entry per decision step)
 dec_odor_norm  = []
 dec_is_feeding = []
+
+# flyvis reflex state — carried across steps
+_loom_persist = 0.0    # decaying T5-asymmetry bias
+_loom_sig_l   = 0.0
+
+# Navigation milestone tracking — prints once per milestone, never repeats
+_nav_milestone = "start"   # states: start, north, wall1, gap1, tunnel, gap2, past_wall2
+
+# Per-step odor asymmetry recording (positive = odor pulling right, negative = left)
+rec_odor_asym  = np.zeros(N_DECISIONS_TOTAL, dtype=np.float32)
+_loom_sig_r   = 0.0
 
 for t in range(N_DECISIONS_TOTAL):
     phys_t   = t * DECISION_INTERVAL
@@ -398,6 +635,42 @@ for t in range(N_DECISIONS_TOTAL):
 
     # ── Update ascending rate (no recompilation — see tests/test_poisson_rate_update.py)
     asc_group.rates = asc_rate * Hz
+
+    # ── Visual rate: compound-eye luminance → LA>ME lamina neuron firing rate ──
+    # obs["vision"] shape (2, 721, 2), float32, range ~[0, 1]
+    _vis = obs.get("vision", None)
+    if _vis is not None:
+        _lum_l = float(np.clip(_vis[0].mean(), 0.0, 1.0))
+        _lum_r = float(np.clip(_vis[1].mean(), 0.0, 1.0))
+        _lum_b = (_lum_l + _lum_r) / 2.0
+        _vis_rate_l = VIS_STIM_MIN_HZ + _lum_l * (VIS_STIM_MAX_HZ - VIS_STIM_MIN_HZ)
+        _vis_rate_r = VIS_STIM_MIN_HZ + _lum_r * (VIS_STIM_MAX_HZ - VIS_STIM_MIN_HZ)
+        _vis_rate_b = VIS_STIM_MIN_HZ + _lum_b * (VIS_STIM_MAX_HZ - VIS_STIM_MIN_HZ)
+        vis_group_l.rates = _vis_rate_l * Hz
+        vis_group_r.rates = _vis_rate_r * Hz
+        vis_group_b.rates = _vis_rate_b * Hz
+        # flyvis biological reflex: obs["vision"] -> T5 motion detectors -> turn bias
+        # T5 = OFF-pathway; asymmetry (left eye > right eye) -> steer right
+        _vis_gray = _vis.max(axis=2).astype(np.float32)       # (2, 721)
+        _vis_mapped = _fv_rm.flygym_to_flyvis(_vis_gray)      # reorder to flyvis hex convention
+        _frame_t = torch.tensor(_vis_mapped, dtype=torch.float32).unsqueeze(1).unsqueeze(2)  # (2,1,1,721)
+        with torch.no_grad():
+            _fv_network.stimulus.zero(2, 1)
+            _fv_network.stimulus.add_input(_frame_t)
+            _fv_states = _fv_network.forward(_fv_network.stimulus(), FLYVIS_DT, state=_fv_state, as_states=True)
+            _fv_state  = _fv_states[-1]
+            _act = _fv_state.nodes.activity                   # (2, n_cells)
+            _loom_sig_l = float(_act[0, _fv_t5a_idx].abs().mean() + _act[0, _fv_t5b_idx].abs().mean())
+            _loom_sig_r = float(_act[1, _fv_t5a_idx].abs().mean() + _act[1, _fv_t5b_idx].abs().mean())
+        _t5_asym = _loom_sig_l - _loom_sig_r
+        _loom_new    = -FLYVIS_T5_GAIN * _t5_asym
+        _loom_persist = float(np.clip(
+            _loom_persist * FLYVIS_DECAY + _loom_new * (1.0 - FLYVIS_DECAY),
+            -FLYVIS_BIAS_MAX, FLYVIS_BIAS_MAX))
+    else:
+        _vis_rate_l = _vis_rate_r = VIS_STIM_MIN_HZ
+        _loom_persist = _loom_persist * FLYVIS_DECAY
+
     _t_proprio = time.time()
 
     # ── Brian2: run 25 ms ─────────────────────────────────────────────────────
@@ -414,10 +687,66 @@ for t in range(N_DECISIONS_TOTAL):
     pos    = obs["fly"][0, :2]
     dist   = float(np.linalg.norm(pos - FOOD_POS[:2]))
 
-    odor       = obs["odor_intensity"][0]
-    left_odor  = float(odor[0] + odor[2]) / 2.0
-    right_odor = float(odor[1] + odor[3]) / 2.0
+    # ── Channeled odor: Dijkstra path-distance field, antennas at fly heading ──
+    if root_joint:
+        _qpos    = sim.physics.named.data.qpos[root_joint]
+        _pos_x   = float(_qpos[0])
+        _pos_y   = float(_qpos[1])
+        _qw      = float(_qpos[3])
+        _qz      = float(_qpos[6])
+        _heading = float(np.arctan2(2.0 * _qw * _qz, 1.0 - 2.0 * _qz**2))
+    else:
+        _pos_x, _pos_y = float(pos[0]), float(pos[1])
+        _heading = 0.0
+    _right_x =  np.sin(_heading)
+    _right_y = -np.cos(_heading)
+    left_odor  = lookup_odor(_pos_x - ANT_SEP * _right_x,
+                             _pos_y - ANT_SEP * _right_y,
+                             _odor_field, _odor_xs, _odor_ys)
+    right_odor = lookup_odor(_pos_x + ANT_SEP * _right_x,
+                             _pos_y + ANT_SEP * _right_y,
+                             _odor_field, _odor_xs, _odor_ys)
     total_odor = left_odor + right_odor
+    _lr_asym   = (right_odor - left_odor) / (total_odor + 1e-9)   # + = pull right, - = pull left
+    _pull_dir  = "right" if _lr_asym > 0.02 else ("left" if _lr_asym < -0.02 else "straight")
+
+    # ── navigation milestone detection (prints once per milestone) ────────────
+    if _nav_milestone == "start" and _pos_y > 3.0:
+        _nav_milestone = "north"
+        print(f"  [NAV] Walking north  step={t}  x={_pos_x:.1f} y={_pos_y:.1f}"
+              f"  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    elif _nav_milestone == "north" and _pos_x >= 7.0:
+        _nav_milestone = "wall1"
+        print(f"  [NAV] Approaching wall 1  step={t}  x={_pos_x:.1f} y={_pos_y:.1f}"
+              f"  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    elif _nav_milestone == "wall1" and _pos_y >= 10.0:
+        _nav_milestone = "gap1"
+        print(f"  [NAV] *** Found wall 1 gap (y>=10)!  step={t}  x={_pos_x:.1f} y={_pos_y:.2f}"
+              f"  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    elif _nav_milestone == "gap1" and _pos_x > 8.2 and 6.0 <= _pos_y <= 10.5:
+        _nav_milestone = "tunnel"
+        print(f"  [NAV] Entered tunnel (x=8..14, y=6..10)  step={t}  x={_pos_x:.1f} y={_pos_y:.1f}"
+              f"  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    elif _nav_milestone == "tunnel" and _pos_y <= 6.0:
+        _nav_milestone = "gap2"
+        print(f"  [NAV] *** Found wall 2 gap (y<=6)!  step={t}  x={_pos_x:.1f} y={_pos_y:.2f}"
+              f"  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    elif _nav_milestone == "gap2" and _pos_x >= 14.0:
+        _nav_milestone = "past_wall2"
+        print(f"  [NAV] *** Past wall 2 - heading to food!  step={t}  x={_pos_x:.1f} y={_pos_y:.1f}"
+              f"  dist={dist:.1f}mm  odor L={left_odor:.2f} R={right_odor:.2f}  pull={_pull_dir}")
+
+    # ── periodic odor + position status every 20 steps ───────────────────────
+    if t % 20 == 0:
+        print(f"  [ODR] step={t:03d}  pos=({_pos_x:.1f},{_pos_y:.1f})"
+              f"  heading={np.degrees(_heading):.0f}deg"
+              f"  odor L={left_odor:.3f} R={right_odor:.3f}  asym={_lr_asym:+.3f}  pull={_pull_dir}"
+              f"  dist={dist:.1f}mm  nav={_nav_milestone}")
 
     # ── phase transitions ────────────────────────────────────────────────────
     if phase == "walk" and dist < FEED_DIST:
@@ -455,12 +784,11 @@ for t in range(N_DECISIONS_TOTAL):
 
     # ── control signal ────────────────────────────────────────────────────────
     if phase == "walk":
-        # Odor gradient for primary steering
-        lr_asym   = (right_odor - left_odor) / (total_odor + 1e-9)
-        odor_turn = np.tanh(lr_asym * 20.0) * ODOR_TURN_K
+        # Odor gradient for primary steering (_lr_asym already computed above)
+        odor_turn = np.tanh(_lr_asym * 20.0) * ODOR_TURN_K
         # DN left/right asymmetry adds subtle brain-grounded variation
         dn_bias   = float(lr_diff_t) * 0.15
-        turn_bias = odor_turn + dn_bias
+        turn_bias = odor_turn + dn_bias + _loom_persist
         ctrl = np.array([
             float(np.clip(WALK_AMP + turn_bias, 0.1, 1.0)),
             float(np.clip(WALK_AMP - turn_bias, 0.1, 1.0)),
@@ -516,9 +844,25 @@ for t in range(N_DECISIONS_TOTAL):
     rec_dn_right[t]   = right_count
     rec_ctrl_left[t]  = ctrl[0]
     rec_ctrl_right[t] = ctrl[1]
+    rec_vis_left[t]   = _vis_rate_l
+    rec_vis_right[t]  = _vis_rate_r
+    rec_loom_sig_l[t] = _loom_sig_l
+    rec_loom_sig_r[t] = _loom_sig_r
+    rec_loom_bias[t]  = _loom_persist
+    rec_odor_left[t]  = left_odor
+    rec_odor_right[t] = right_odor
+    rec_odor_asym[t]  = _lr_asym
+    if root_joint:
+        _qpos = sim.physics.named.data.qpos[root_joint]
+        rec_fly_x[t] = float(_qpos[0])
+        rec_fly_y[t] = float(_qpos[1])
+        # yaw from quaternion (qw, qx, qy, qz at indices 3..6)
+        _qw, _qz = float(_qpos[3]), float(_qpos[6])
+        rec_fly_head[t] = float(np.arctan2(2.0*_qw*_qz, 1.0 - 2.0*_qz*_qz))
 
-frames_iso = cam_iso._frames
-frames_top = cam_top._frames
+frames_iso  = cam_iso._frames
+frames_top  = cam_top._frames
+frames_back = cam_back._frames
 n_video_frames = len(frames_iso)
 raw_trains = spk_mon.spike_trains()
 n_spiking  = sum(1 for v in raw_trains.values() if len(v) > 0)
@@ -581,6 +925,8 @@ cmap_olf = LinearSegmentedColormap.from_list(
     "olf", ["#0f0510", "#3a0a30", "#cc2288", "#ff55bb", "#ffccee"])
 cmap_sez = LinearSegmentedColormap.from_list(
     "sez", ["#100500", "#301500", "#cc5500", "#ff9944", "#ffeecc"])
+cmap_vis = LinearSegmentedColormap.from_list(
+    "vis", ["#0a0a00", "#252000", "#bbaa00", "#ffee00", "#ffffff"])
 
 fig_b = plt.figure(figsize=(BRAIN_PANEL_W / 100, BRAIN_PANEL_H / 100),
                    dpi=100, facecolor="black")
@@ -637,6 +983,16 @@ if len(sez_dense) > 0:
 else:
     sc_sez = None
 
+# Layer 5 — LA>ME lamina / visual neurons (yellow)
+if len(lam_dense) > 0:
+    g_vis = g0[lam_dense]
+    sc_vis = ax_b.scatter(px[lam_dense], pz[lam_dense],
+                          s=DOT_BG_SIZE + g_vis * DOT_VIS_SIZE,
+                          c=g_vis, cmap=cmap_vis, vmin=0, vmax=0.25,
+                          alpha=0.08, linewidths=0, rasterized=True, zorder=6)
+else:
+    sc_vis = None
+
 # ── legend (bottom strip) ─────────────────────────────────────────────────────
 # background strip
 ax_leg = fig_b.add_axes([0, 0.0, 1, 0.10])
@@ -645,22 +1001,27 @@ ax_leg.axis("off")
 
 ax_leg.text(0.01, 0.50, "●", color="#4ab8cc", fontsize=11, va="center", ha="left",
             transform=ax_leg.transAxes)
-ax_leg.text(0.07, 0.50, "LIF activity", color="#4ab8cc", fontsize=8,
+ax_leg.text(0.06, 0.50, "LIF activity", color="#4ab8cc", fontsize=8,
             va="center", ha="left", transform=ax_leg.transAxes)
 
-ax_leg.text(0.28, 0.50, "●", color="#33ff88", fontsize=11, va="center", ha="left",
+ax_leg.text(0.21, 0.50, "●", color="#33ff88", fontsize=11, va="center", ha="left",
             transform=ax_leg.transAxes)
-ax_leg.text(0.34, 0.50, "locomotion (DN)", color="#33ff88", fontsize=8,
+ax_leg.text(0.26, 0.50, "locomotion (DN)", color="#33ff88", fontsize=8,
             va="center", ha="left", transform=ax_leg.transAxes)
 
-ax_leg.text(0.56, 0.50, "●", color="#ff55bb", fontsize=11, va="center", ha="left",
+ax_leg.text(0.44, 0.50, "●", color="#ff55bb", fontsize=11, va="center", ha="left",
             transform=ax_leg.transAxes)
-ax_leg.text(0.62, 0.50, "olfactory", color="#ff55bb", fontsize=8,
+ax_leg.text(0.49, 0.50, "olfactory", color="#ff55bb", fontsize=8,
             va="center", ha="left", transform=ax_leg.transAxes)
 
-ax_leg.text(0.78, 0.50, "●", color="#ff9944", fontsize=11, va="center", ha="left",
+ax_leg.text(0.62, 0.50, "●", color="#ff9944", fontsize=11, va="center", ha="left",
             transform=ax_leg.transAxes)
-ax_leg.text(0.84, 0.50, "SEZ/feeding", color="#ff9944", fontsize=8,
+ax_leg.text(0.67, 0.50, "SEZ/feeding", color="#ff9944", fontsize=8,
+            va="center", ha="left", transform=ax_leg.transAxes)
+
+ax_leg.text(0.81, 0.50, "●", color="#ffee00", fontsize=11, va="center", ha="left",
+            transform=ax_leg.transAxes)
+ax_leg.text(0.86, 0.50, "visual (LA>ME)", color="#ffee00", fontsize=8,
             va="center", ha="left", transform=ax_leg.transAxes)
 
 # ── time + state label ────────────────────────────────────────────────────────
@@ -712,6 +1073,19 @@ for i in range(n_video_frames):
         sc_sez.set_sizes(DOT_BG_SIZE + g_sez * DOT_SEZ_SIZE)
         sc_sez.set_alpha(float(np.clip(0.05 + sez_boost * 0.85, 0.05, 0.90)))
 
+    # ── Visual layer (yellow — LA>ME lamina, alpha ∝ mean luminance) ─────────
+    if sc_vis is not None and len(lam_dense) > 0:
+        # Use mean of rec_vis_left/right at this video frame (interpolated)
+        dec_i = int(np.clip(i * N_DECISIONS_TOTAL / max(n_video_frames, 1),
+                            0, N_DECISIONS_TOTAL - 1))
+        vis_lum = float(np.clip(
+            (rec_vis_left[dec_i] + rec_vis_right[dec_i]) / 2.0 / VIS_STIM_MAX_HZ,
+            0.0, 1.0))
+        g_vis = g_all[lam_dense]
+        sc_vis.set_array(g_vis)
+        sc_vis.set_sizes(DOT_BG_SIZE + g_vis * DOT_VIS_SIZE)
+        sc_vis.set_alpha(float(np.clip(0.05 + vis_lum * 0.80, 0.05, 0.85)))
+
     # ── labels ────────────────────────────────────────────────────────────────
     t_txt.set_text(f"t = {brain_t_ms / 1000:.2f} s")
     if vf_feeding[i] > 0.1:
@@ -741,16 +1115,23 @@ print("Writing video ...")
 _t_video = time.time()
 out_path = sim_dir / f"v{next_v}_brain_body_v4.mp4"
 
-# Layout:  TOP  = brain panel  (BRAIN_PANEL_W × BRAIN_PANEL_H)
-#          BOTTOM = iso view LEFT | top-down view RIGHT  (each BRAIN_PANEL_W/2 wide)
+# Layout:  ROW 1 = brain panel        (BRAIN_PANEL_W × BRAIN_PANEL_H)
+#          ROW 2 = iso view | top-down (each BRAIN_PANEL_W/2 wide)
+#          ROW 3 = cat-cam back view   (BRAIN_PANEL_W wide — full width)
 FLY_H, FLY_W = frames_iso[0].shape[:2]
-fly_panel_w  = BRAIN_PANEL_W // 2          # each fly panel is half the brain width
+fly_panel_w  = BRAIN_PANEL_W // 2          # iso + top-down each half width
 fly_panel_h  = int(FLY_H * fly_panel_w / FLY_W)
 if fly_panel_h % 2 != 0:
     fly_panel_h += 1
 
+# Cat-cam row: full width, height scaled to keep original aspect ratio
+BACK_H, BACK_W = frames_back[0].shape[:2]
+back_panel_h = int(BACK_H * BRAIN_PANEL_W / BACK_W)
+if back_panel_h % 2 != 0:
+    back_panel_h += 1
+
 total_w = BRAIN_PANEL_W
-total_h = BRAIN_PANEL_H + fly_panel_h
+total_h = BRAIN_PANEL_H + fly_panel_h + back_panel_h
 
 try:
     from PIL import Image as PILImage
@@ -767,11 +1148,12 @@ writer = imageio.get_writer(
     output_params=["-pix_fmt", "yuv420p", "-crf", "18"],
 )
 for i in range(n_video_frames):
-    top_row    = brain_panels[i]                                  # (480, 1280, 3)
-    iso_panel  = _resize(frames_iso[i], fly_panel_w, fly_panel_h)
-    top_panel  = _resize(frames_top[i], fly_panel_w, fly_panel_h)
-    bottom_row = np.concatenate([iso_panel, top_panel], axis=1)  # (H, 1280, 3)
-    combined   = np.concatenate([top_row, bottom_row], axis=0)   # (480+H, 1280, 3)
+    row1 = brain_panels[i]                                        # (480,  1280, 3)
+    iso_panel  = _resize(frames_iso[i],  fly_panel_w, fly_panel_h)
+    top_panel  = _resize(frames_top[i],  fly_panel_w, fly_panel_h)
+    row2 = np.concatenate([iso_panel, top_panel], axis=1)         # (H,    1280, 3)
+    row3 = _resize(frames_back[i], BRAIN_PANEL_W, back_panel_h)  # (H2,   1280, 3)
+    combined = np.concatenate([row1, row2, row3], axis=0)
     writer.append_data(combined)
 writer.close()
 
@@ -779,7 +1161,7 @@ print(f"\nDone — {out_path}")
 print(f"  Physics duration : {PHYS_DURATION_S:.0f}s")
 print(f"  Brain duration   : {BRAIN_DURATION_S:.0f}s  (same — no tiling)")
 print(f"  Video duration   : {n_video_frames / FPS_V:.1f}s  ({n_video_frames} frames @ {FPS_V} fps)")
-print(f"  Resolution       : {total_w} × {total_h} px  (brain top | iso+top-down bottom)")
+print(f"  Resolution       : {total_w} × {total_h} px  (brain | iso+top-down | cat-cam)")
 print(f"  Circuits shown   : DN (green)  olfactory (pink)  SEZ/feeding (orange)")
 print(f"\n-- Timing breakdown ------------------------------------------")
 print(f"  Network setup    : {_elapsed(_t_brian)}")
@@ -840,8 +1222,29 @@ with h5py.File(data_path, "w") as f:
     b.create_dataset("dn_right_count", data=rec_dn_right)
     b.create_dataset("ctrl_left",      data=rec_ctrl_left)
     b.create_dataset("ctrl_right",     data=rec_ctrl_right)
+    b.create_dataset("vis_rate_left",  data=rec_vis_left)
+    b.create_dataset("vis_rate_right", data=rec_vis_right)
+    b.create_dataset("loom_signal_l",  data=rec_loom_sig_l)
+    b.create_dataset("loom_signal_r",  data=rec_loom_sig_r)
+    b.create_dataset("loom_bias",      data=rec_loom_bias)
+    b.create_dataset("fly_x",          data=rec_fly_x)
+    b.create_dataset("fly_y",          data=rec_fly_y)
+    b.create_dataset("fly_heading",    data=rec_fly_head)
+    b.create_dataset("odor_left",      data=rec_odor_left)
+    b.create_dataset("odor_right",     data=rec_odor_right)
+    b.create_dataset("odor_asym",      data=rec_odor_asym)
     b.create_dataset("odor_norm",      data=np.array(dec_odor_norm,  dtype=np.float32))
     b.create_dataset("is_feeding",     data=np.array(dec_is_feeding, dtype=np.float32))
+
+    # -- channeled odor field (Dijkstra grid) for trajectory overlay plots
+    og = f.create_group("odor_field")
+    og.create_dataset("field", data=_odor_field.astype(np.float32), compression="gzip")
+    og.create_dataset("xs",    data=_odor_xs.astype(np.float32))
+    og.create_dataset("ys",    data=_odor_ys.astype(np.float32))
+    og.create_dataset("blocked", data=_odor_blocked.astype(np.uint8), compression="gzip")
+    og.attrs["grid_res"] = GRID_RES
+    og.attrs["food_x"]   = float(FOOD_POS[0])
+    og.attrs["food_y"]   = float(FOOD_POS[1])
 
     # -- spike trains per circuit (flat times+idx arrays, gzip compressed)
     s = f.create_group("spikes")
