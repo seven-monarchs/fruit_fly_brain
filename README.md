@@ -3,10 +3,10 @@
 Français 🇫🇷 | [English 🇬🇧](README.en.md)
 
 ![Apercu de la simulation v1](simulations/preview.gif)
-*v1 - Navigation olfactive seule, sans systeme visuel*
+*v1 - Navigation olfactive seule, sans système visuel*
 
 ![Apercu de la simulation v4](simulations/preview2.gif)
-*v4 - Navigation en zigzag avec odeur canalisee, T5 flyvis et camera dorsale*
+*v4 - Navigation en zigzag avec odeur canalisée, T5 flyvis et caméra dorsale*
 
 Une simulation en boucle fermée de *Drosophila melanogaster* (drosophile) qui couple un réseau de neurones à décharges biologiquement précis à un corps physique 3D. L'activité neuronale issue du vrai connectome de la mouche pilote la locomotion, la navigation olfactive et le comportement alimentaire, le tout visualisé dans une vidéo en écran divisé.
 
@@ -59,7 +59,9 @@ Les neurones descendants (DN) du cerveau fournissent un biais gauche/droite qui 
 simulations/vN_brain_body_v4.mp4
 ```
 
-Disposition (1280 × ~1200 px) :
+La disposition est contrôlée par le paramètre `--cameras` (2 ou 3 noms de caméras). La rangée 1 est toujours le panneau cérébral ; la rangée 2 est toujours deux caméras côte à côte ; la rangée 3 (optionnelle) affiche une troisième caméra en pleine largeur.
+
+**Disposition par défaut - 2 caméras (1280 × ~840 px) :**
 
 ```text
 ┌─────────────────────────────────────────────────┐  480 px
@@ -68,16 +70,13 @@ Disposition (1280 × ~1200 px) :
 │  rose = olfactif     orange = SEZ (alimentation)│
 │  [état : "walking" / "odor detected" / "feeding"]│
 ├──────────────────────┬──────────────────────────┤
-│   vue isométrique    │     vue du dessus        │  ~360 px
-│  (camera_top_right)  │  (camera_top_zoomout)   │
-├──────────────────────┴──────────────────────────┤
-│      camera dorsale - pleine largeur            │  ~360 px
-│           (camera_back_close)                   │
-└─────────────────────────────────────────────────┘
+│    vue du dessus     │   camera dorsale         │  ~360 px
+│ (camera_top_zoomout) │  (camera_back_close)    │
+└──────────────────────┴──────────────────────────┘
               1280 px
 ```
 
-La **camera dorsale** (troisième rangée) suit la mouche depuis 4 mm derrière elle et 3,5 mm au-dessus de son dos, en pivotant avec son cap. Elle montre le dos de la mouche et l'environnement devant - murs, couloir et nourriture.
+La **caméra dorsale** (`camera_back_close`) suit la mouche depuis 4 mm derrière elle et 3,5 mm au-dessus de son dos, en pivotant avec son cap. Elle montre le dos de la mouche et l'environnement devant - murs, couloir et nourriture.
 
 La vidéo tourne à **0,25× la vitesse réelle** (10 s de physique = 40 s de vidéo).
 
@@ -130,7 +129,7 @@ Taux de décharge moyen (Hz) pour chaque circuit sur les 10 secondes de simulati
 
 ![Raster de spikes](plots/v42/FR/02_raster_circuits.png)
 
-Chaque point représente un spike individuel (neurone × temps). Limité à 150 neurones par circuit pour la lisibilité. Permet de voir la variabilité inter-neuronale : certains neurones DN sont très actifs, d'autres silencieux. C'est le pattern caractéristique d'un réseau LIF avec connectivité hétérogène.
+Chaque point représente un spike individuel (neurone × temps). Limité à 150 neurones par circuit pour la lisibilité. Permet de voir la variabilité inter-neuronale : certains neurones DN sont très actifs, d'autres silencieux. C'est le comportement caractéristique d'un réseau LIF avec connectivité hétérogène.
 
 #### 03 : Neurones descendants vs sortie motrice
 
@@ -236,7 +235,7 @@ pip install -r requirements.txt
 
 ### Configurer le backend C++ pour Brian2 (optionnel mais fortement recommandé, ×10 plus rapide)
 
-Sans compilateur, la simulation tourne quand même via le backend numpy (`run.bat` bascule automatiquement). Avec le compilateur C++, le run Brian2 passe de ~50 min à ~5 min.
+Sans compilateur, la simulation tourne quand même via le backend numpy (`run.bat` bascule automatiquement). Avec le compilateur C++, l'exécution Brian2 passe de ~50 min à ~5 min.
 
 #### Étape 1 : Installer Visual Studio 2022
 
@@ -296,7 +295,7 @@ docker run --rm \
   fly-brain-sim
 ```
 
-Sous Windows PowerShell, remplacer `$(pwd)` par `${PWD}`. Brian2 utilise GCC dans le conteneur, Visual Studio n'est pas nécessaire. Le premier lancement ajoute ~13 min de compilation Cython ; pour conserver le cache entre les runs, ajouter `-v brian2-cache:/root/.cython` à la commande.
+Sous Windows PowerShell, remplacer `$(pwd)` par `${PWD}`. Brian2 utilise GCC dans le conteneur, Visual Studio n'est pas nécessaire. Le premier lancement ajoute ~13 min de compilation Cython ; pour conserver le cache entre les exécutions, ajouter `-v brian2-cache:/root/.cython` à la commande.
 
 ### Option B : Windows natif (recommandé pour le développement)
 
@@ -312,6 +311,18 @@ Ou manuellement depuis une invite de commandes avec l'environnement VS :
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 wenv310\Scripts\python.exe fly_brain_body_simulation.py
 ```
+
+**Choix des caméras** - paramètre `--cameras` avec 2 ou 3 noms (défaut : vue du dessus + caméra dorsale) :
+
+```bat
+REM Défaut : vue du dessus + caméra dorsale côte à côte
+wenv310\Scripts\python.exe fly_brain_body_simulation.py --cameras camera_top_zoomout camera_back_close
+
+REM 3 caméras : ajoute la vue isométrique en pleine largeur en bas
+wenv310\Scripts\python.exe fly_brain_body_simulation.py --cameras camera_top_zoomout camera_back_close camera_top_right
+```
+
+Noms disponibles : `camera_top_zoomout` (vue du dessus), `camera_back_close` (caméra dorsale), `camera_top_right` (vue isométrique).
 
 **Durée estimée : ~2h30-3h** avec le backend C++ (cache chaud). Le premier lancement absolu ajoute ~13 min de compilation C++ (Brian2 compile ~50M synapses en Cython/C++, une seule fois, puis mis en cache).
 
@@ -381,7 +392,7 @@ Pour revenir au backend numpy (sans compilateur), décommenter dans `fly_brain_b
    Champ d'odeur Dijkstra pré-calculé (grille 0,5 mm/cellule, murs bloquants)
    Deux murs solides : mur1 x=8 y=-15..10, mur2 x=14 y=6..16
    Fly spawn (0,0,0.2) cap nord-est (0,588 rad, ~34°)
-   3 caméras : isométrique + vue du dessus + caméra dorsale
+   Caméras : configurées via --cameras (défaut : vue du dessus + caméra dorsale)
    Corps mocap proboscis (capsule bleue)
         │
         ▼
@@ -401,8 +412,8 @@ Pour revenir au backend numpy (sans compilateur), décommenter dans `fly_brain_b
         ▼
 [8. Assemblage et encodage vidéo]
    Rangée 1 : panneau cerveau (1280×480)
-   Rangée 2 : vue iso + vue top (640×H chacune)
-   Rangée 3 : caméra dorsale (1280×H, pleine largeur)
+   Rangée 2 : vue iso + vue du dessus (640×H chacune)
+   Rangée 3 : 3e caméra en pleine largeur (1280×H) — si 3 caméras fournies
    h264, CRF 18, yuv420p
         │
         ▼
@@ -522,7 +533,7 @@ En interne, il :
 
 `obs["odor_intensity"]` → shape `(1, 4)` → `[ant_gauche, ant_droite, palpe_gauche, palpe_droite]`
 
-La concentration suit une loi d'inverse du carré : `C(r) = peak_intensity / r²`. Avec `peak_intensity = 500`, l'odeur atteint ~2 à 15 mm, ~100 à 7 mm, ~1 500 à moins de 2 mm de la source.
+La concentration décroît en loi inverse du carré : `C(r) = peak_intensity / r²`. Avec `peak_intensity = 500`, l'odeur atteint ~2 à 15 mm, ~100 à 7 mm, ~1 500 à moins de 2 mm de la source.
 
 ---
 
@@ -530,7 +541,7 @@ La concentration suit une loi d'inverse du carré : `C(r) = peak_intensity / r²
 
 C'est le cœur du projet. Les neurones descendants (DNs) sont les **seuls câbles biologiques** reliant le cerveau au système moteur.
 
-### Readout moteur des DNs
+### Signal moteur des DNs
 
 Le run Brian2 de 10 s est découpé en 400 fenêtres de 25 ms (une par décision physique) :
 
@@ -670,8 +681,8 @@ fly_brain_simulation/
 │   ├── flywire_annotations.tsv    # types cellulaires + coordonnées soma/pos
 │   └── descending_neurons.csv     # 1 299 DNs avec côté latéral
 ├── simulations/
-│   ├── preview.gif                # apercu v1
-│   ├── preview2.gif               # apercu v4
+│   ├── preview.gif                # aperçu v1
+│   ├── preview2.gif               # aperçu v4
 │   └── vN_brain_body_v4.mp4       # vidéos versionnées
 ├── tests/
 │   ├── test_flyvis_stateful_timing.py   # accélération 174x du forward() stateful confirmée
@@ -838,7 +849,17 @@ La boucle est maintenant entièrement fermée : le cerveau influence le corps (v
 
 ### Origine du projet
 
-Je suis ingénieur logiciel et je vis avec la Sclérose en Plaques. Cette combinaison (un intérêt personnel dans la compréhension de la démyélinisation et la formation technique pour construire des outils computationnels) est la raison directe pour laquelle ce projet existe.
+Ce projet a été directement inspiré par les travaux d'**EON Systems PBC**, une entreprise qui travaille sur l'émulation cerveau-corps. Début 2025, le co-fondateur **Dr. Alex Wissner-Gross** a partagé une vidéo montrant une simulation du cerveau de *Drosophila* à connectome complet pilotant un corps physique - la première démonstration publique de ce type que j'avais vue. Constater que c'était possible, et que les outils sous-jacents (connectome FlyWire, Brian2, NeuroMechFly) étaient tous open source, est ce qui m'a poussé à construire une implémentation indépendante.
+
+- Annonce EON Systems : [eon.systems/updates/weve-uploaded-a-fruit-fly](https://eon.systems/updates/weve-uploaded-a-fruit-fly)
+- Description technique : [eon.systems/updates/embodied-brain-emulation](https://eon.systems/updates/embodied-brain-emulation)
+- Vidéo partagée par le Dr. Wissner-Gross : [youtube.com/watch?v=e21OUXPlnhk](https://www.youtube.com/watch?v=e21OUXPlnhk)
+
+Ce projet est une réimplémentation indépendante, sans affiliation avec EON Systems ni approbation de leur part. Tout le code a été écrit à partir de zéro en utilisant les mêmes jeux de données publics et bibliothèques open source.
+
+### Contexte personnel
+
+Je suis ingénieur logiciel et je vis avec la Sclérose en Plaques. Cette combinaison - un intérêt personnel pour la compréhension de la démyélinisation et les compétences techniques pour construire des outils computationnels - est la raison directe pour laquelle ce projet existe.
 
 La question initiale était simple : serait-il possible d'assembler des outils open source publiquement disponibles (un vrai connectome, un simulateur physique, un framework de réseau de neurones à décharges) en une simulation cerveau-corps fonctionnelle en boucle fermée, entièrement sur du matériel grand public, sans ressources institutionnelles ? Ce projet est la réponse : une implémentation solo construite sur un ordinateur portable milieu de gamme, intégrant FlyWire, Brian2 et NeuroMechFly en un seul pipeline.
 

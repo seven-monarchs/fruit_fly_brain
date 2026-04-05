@@ -79,6 +79,31 @@ PATH_CON   = BRAIN_DIR / "Connectivity_783.parquet"
 sys.path.insert(0, str(BRAIN_DIR))
 from model import create_model, poi, default_params
 
+# ── Command-line arguments ────────────────────────────────────────────────────
+import argparse as _argparse
+_ap = _argparse.ArgumentParser(
+    description="Fly brain-body simulation",
+    formatter_class=_argparse.RawDescriptionHelpFormatter,
+    epilog=(
+        "Camera names:\n"
+        "  camera_back_close   cat-cam (4mm behind, 3.5mm above lower back)\n"
+        "  camera_top_zoomout  top-down overview\n"
+        "  camera_top_right    isometric 3/4 view\n"
+        "\nExamples:\n"
+        "  python fly_brain_body_simulation.py --cameras camera_back_close camera_top_zoomout\n"
+        "  python fly_brain_body_simulation.py --cameras camera_top_right camera_top_zoomout camera_back_close\n"
+    ),
+)
+_ap.add_argument(
+    "--cameras", nargs="+", metavar="CAM",
+    default=["camera_back_close", "camera_top_zoomout"],
+    help="2 or 3 camera names (default: camera_back_close camera_top_zoomout)",
+)
+_args = _ap.parse_args()
+if not (2 <= len(_args.cameras) <= 3):
+    _ap.error("--cameras requires 2 or 3 camera names")
+_CLI_CAMERAS = _args.cameras
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PARAMETERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -99,6 +124,22 @@ N_BRAIN_DECISIONS          = int(BRAIN_DURATION_S / DECISION_INTERVAL)   # 400 (
 WALK_AMP     = 0.75
 ODOR_TURN_K  = 2.5
 FOOD_POS     = np.array([20.0, 2.0, 0.0])
+
+# ── Video camera configuration ────────────────────────────────────────────────
+# Row 1 (top) is always the brain panel.
+# Row 2 (middle) is always the two cameras listed here, side by side.
+# Row 3 (bottom, optional) is the third camera listed here, full width.
+# Maximum 3 cameras. Order determines layout position.
+#
+# Available presets (flygym built-in names):
+#   "camera_top_right"   isometric 3/4 view (default iso)
+#   "camera_top_zoomout" top-down overview
+#   "camera_back_close"  cat-cam: 4mm behind, 3.5mm above lower back (custom)
+#
+# Examples:
+#   2 cameras  ->  brain | cam1 + cam2
+#   3 cameras  ->  brain | cam1 + cam2 | cam3 (full width)
+VIDEO_CAMERAS = _CLI_CAMERAS   # set via --cameras (default: camera_back_close camera_top_zoomout)
 FEED_DIST    = 1.2     # mm — proximity trigger
 FEED_DUR     = 2.0     # s
 
@@ -453,38 +494,33 @@ fly = Fly(
     enable_olfaction=True, enable_adhesion=True, draw_adhesion=False,
     enable_vision=True,
 )
-cam_iso = YawOnlyCamera(
-    attachment_point=fly.model.worldbody,
-    camera_name="camera_top_right",
-    targeted_fly_names=fly.name,
-    timestamp_text=False, play_speed_text=False,
-    play_speed=PLAY_SPEED, fps=FPS_V,
-)
-cam_top = YawOnlyCamera(
-    attachment_point=fly.model.worldbody,
-    camera_name="camera_top_zoomout",
-    targeted_fly_names=fly.name,
-    timestamp_text=False, play_speed_text=False,
-    play_speed=PLAY_SPEED, fps=FPS_V,
-)
-# Third-person "cat cam" — 4mm behind, 3.5mm above lower back, yaws with fly.
-# Parameters confirmed in tests/test_back_camera.py.
-cam_back = YawOnlyCamera(
-    attachment_point=fly.model.worldbody,
-    camera_name="camera_back_close",
-    targeted_fly_names=fly.name,
-    timestamp_text=False, play_speed_text=False,
-    play_speed=PLAY_SPEED, fps=FPS_V,
-    camera_parameters={
-        "class": "nmf",
-        "mode":  "track",
-        "ipd":   0.068,
-        "pos":   [-4, 0, 3.5],
-        "euler": [1.1, 0.0, -1.57],
+# Custom camera parameters (for cameras not in flygym's built-in config)
+_CUSTOM_CAM_PARAMS = {
+    "camera_back_close": {
+        "class": "nmf", "mode": "track", "ipd": 0.068,
+        "pos": [-4, 0, 3.5], "euler": [1.1, 0.0, -1.57],
     },
-)
+}
+
+assert 2 <= len(VIDEO_CAMERAS) <= 3, "VIDEO_CAMERAS must have 2 or 3 entries"
+
+def _make_cam(name):
+    kwargs = dict(
+        attachment_point=fly.model.worldbody,
+        camera_name=name,
+        targeted_fly_names=fly.name,
+        timestamp_text=False, play_speed_text=False,
+        play_speed=PLAY_SPEED, fps=FPS_V,
+    )
+    if name in _CUSTOM_CAM_PARAMS:
+        kwargs["camera_parameters"] = _CUSTOM_CAM_PARAMS[name]
+    return YawOnlyCamera(**kwargs)
+
+_cams = [_make_cam(name) for name in VIDEO_CAMERAS]
+print(f"  Cameras: {' | '.join(VIDEO_CAMERAS)}")
+
 sim = HybridTurningController(
-    fly=fly, cameras=[cam_iso, cam_top, cam_back], arena=arena, timestep=PHYSICS_TIMESTEP,
+    fly=fly, cameras=_cams, arena=arena, timestep=PHYSICS_TIMESTEP,
 )
 obs, _ = sim.reset()
 
@@ -860,10 +896,8 @@ for t in range(N_DECISIONS_TOTAL):
         _qw, _qz = float(_qpos[3]), float(_qpos[6])
         rec_fly_head[t] = float(np.arctan2(2.0*_qw*_qz, 1.0 - 2.0*_qz*_qz))
 
-frames_iso  = cam_iso._frames
-frames_top  = cam_top._frames
-frames_back = cam_back._frames
-n_video_frames = len(frames_iso)
+_all_frames = [c._frames for c in _cams]
+n_video_frames = len(_all_frames[0])
 raw_trains = spk_mon.spike_trains()
 n_spiking  = sum(1 for v in raw_trains.values() if len(v) > 0)
 print(f"  {n_video_frames} fly frames captured  |  {n_spiking:,} neurons fired  [{_elapsed(_t_phys)}]")
@@ -1115,23 +1149,26 @@ print("Writing video ...")
 _t_video = time.time()
 out_path = sim_dir / f"v{next_v}_brain_body_v4.mp4"
 
-# Layout:  ROW 1 = brain panel        (BRAIN_PANEL_W × BRAIN_PANEL_H)
-#          ROW 2 = iso view | top-down (each BRAIN_PANEL_W/2 wide)
-#          ROW 3 = cat-cam back view   (BRAIN_PANEL_W wide — full width)
-FLY_H, FLY_W = frames_iso[0].shape[:2]
-fly_panel_w  = BRAIN_PANEL_W // 2          # iso + top-down each half width
-fly_panel_h  = int(FLY_H * fly_panel_w / FLY_W)
+# Layout:  ROW 1 = brain panel              (BRAIN_PANEL_W x BRAIN_PANEL_H)
+#          ROW 2 = cam[0] | cam[1]          (each BRAIN_PANEL_W/2 wide)
+#          ROW 3 = cam[2] full width        (only when len(VIDEO_CAMERAS) == 3)
+_row2_h, _row2_w = _all_frames[0][0].shape[:2]
+fly_panel_w = BRAIN_PANEL_W // 2
+fly_panel_h = int(_row2_h * fly_panel_w / _row2_w)
 if fly_panel_h % 2 != 0:
     fly_panel_h += 1
 
-# Cat-cam row: full width, height scaled to keep original aspect ratio
-BACK_H, BACK_W = frames_back[0].shape[:2]
-back_panel_h = int(BACK_H * BRAIN_PANEL_W / BACK_W)
-if back_panel_h % 2 != 0:
-    back_panel_h += 1
+_has_row3 = len(VIDEO_CAMERAS) == 3
+if _has_row3:
+    _row3_h, _row3_w = _all_frames[2][0].shape[:2]
+    row3_panel_h = int(_row3_h * BRAIN_PANEL_W / _row3_w)
+    if row3_panel_h % 2 != 0:
+        row3_panel_h += 1
+else:
+    row3_panel_h = 0
 
 total_w = BRAIN_PANEL_W
-total_h = BRAIN_PANEL_H + fly_panel_h + back_panel_h
+total_h = BRAIN_PANEL_H + fly_panel_h + row3_panel_h
 
 try:
     from PIL import Image as PILImage
@@ -1148,20 +1185,24 @@ writer = imageio.get_writer(
     output_params=["-pix_fmt", "yuv420p", "-crf", "18"],
 )
 for i in range(n_video_frames):
-    row1 = brain_panels[i]                                        # (480,  1280, 3)
-    iso_panel  = _resize(frames_iso[i],  fly_panel_w, fly_panel_h)
-    top_panel  = _resize(frames_top[i],  fly_panel_w, fly_panel_h)
-    row2 = np.concatenate([iso_panel, top_panel], axis=1)         # (H,    1280, 3)
-    row3 = _resize(frames_back[i], BRAIN_PANEL_W, back_panel_h)  # (H2,   1280, 3)
-    combined = np.concatenate([row1, row2, row3], axis=0)
+    row1 = brain_panels[i]
+    panel_a = _resize(_all_frames[0][i], fly_panel_w, fly_panel_h)
+    panel_b = _resize(_all_frames[1][i], fly_panel_w, fly_panel_h)
+    row2 = np.concatenate([panel_a, panel_b], axis=1)
+    if _has_row3:
+        row3 = _resize(_all_frames[2][i], BRAIN_PANEL_W, row3_panel_h)
+        combined = np.concatenate([row1, row2, row3], axis=0)
+    else:
+        combined = np.concatenate([row1, row2], axis=0)
     writer.append_data(combined)
 writer.close()
 
+_cam_label = " | ".join(VIDEO_CAMERAS)
 print(f"\nDone — {out_path}")
 print(f"  Physics duration : {PHYS_DURATION_S:.0f}s")
 print(f"  Brain duration   : {BRAIN_DURATION_S:.0f}s  (same — no tiling)")
 print(f"  Video duration   : {n_video_frames / FPS_V:.1f}s  ({n_video_frames} frames @ {FPS_V} fps)")
-print(f"  Resolution       : {total_w} × {total_h} px  (brain | iso+top-down | cat-cam)")
+print(f"  Resolution       : {total_w} x {total_h} px  (brain | {_cam_label})")
 print(f"  Circuits shown   : DN (green)  olfactory (pink)  SEZ/feeding (orange)")
 print(f"\n-- Timing breakdown ------------------------------------------")
 print(f"  Network setup    : {_elapsed(_t_brian)}")

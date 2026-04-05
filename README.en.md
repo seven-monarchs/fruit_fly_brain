@@ -60,7 +60,9 @@ Descending neurons (DNs) from the brain provide a left/right bias that modulates
 simulations/vN_brain_body_v4.mp4
 ```
 
-Layout (1280 × ~1200 px):
+Layout is controlled by the `--cameras` flag (2 or 3 camera names). Row 1 is always the brain panel; row 2 is always two cameras side by side; row 3 (optional) is a third camera at full width.
+
+**Default layout - 2 cameras (1280 × ~840 px):**
 
 ```text
 ┌─────────────────────────────────────────────────┐  480 px
@@ -69,16 +71,13 @@ Layout (1280 × ~1200 px):
 │  pink = olfactory    orange = SEZ (feeding)     │
 │  [state: "walking" / "odor detected" / "feeding"]│
 ├──────────────────────┬──────────────────────────┤
-│   isometric view     │      top-down view       │  ~360 px
-│  (camera_top_right)  │  (camera_top_zoomout)    │
-├──────────────────────┴──────────────────────────┤
-│        cat cam - back camera (full width)       │  ~360 px
-│              (camera_back_close)                │
-└─────────────────────────────────────────────────┘
+│    top-down view     │   cat cam (back view)    │  ~360 px
+│  (camera_top_zoomout)│  (camera_back_close)     │
+└──────────────────────┴──────────────────────────┘
               1280 px
 ```
 
-The **cat cam** (bottom row) follows the fly from 4mm behind and 3.5mm above its lower back, yawing with the fly's heading. It shows the fly's back and the environment ahead - walls, tunnel corridor, and food source.
+The **cat cam** (`camera_back_close`) follows the fly from 4mm behind and 3.5mm above its lower back, yawing with the fly's heading. It shows the fly's back and the environment ahead - walls, tunnel corridor, and food source.
 
 The video plays at **0.25× real speed**: 10 s of physics = 40 s of video.
 
@@ -314,6 +313,18 @@ Or manually from a command prompt with the VS environment:
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 wenv310\Scripts\python.exe fly_brain_body_simulation.py
 ```
+
+**Choosing cameras** - use the `--cameras` flag with 2 or 3 names (default: top-down + cat cam):
+
+```bat
+REM Default: top-down view + cat cam side by side
+wenv310\Scripts\python.exe fly_brain_body_simulation.py --cameras camera_top_zoomout camera_back_close
+
+REM 3 cameras: adds isometric view as a full-width bottom row
+wenv310\Scripts\python.exe fly_brain_body_simulation.py --cameras camera_top_zoomout camera_back_close camera_top_right
+```
+
+Available names: `camera_top_zoomout` (top-down), `camera_back_close` (cat cam), `camera_top_right` (isometric).
 
 **Estimated duration: ~2.5–3 hours** with the C++ backend (warm cache). The very first run adds ~13 min for C++ compilation (Brian2 compiles ~50M synapses via Cython/C++ once, then caches).
 
@@ -771,6 +782,16 @@ The loop is now fully closed: the brain influences the body (via DNs), and the b
 ## Motivations and future directions
 
 ### Origin of the project
+
+This project was directly inspired by the work of **EON Systems PBC**, a company working on embodied brain emulation. In early 2025, co-founder **Dr. Alex Wissner-Gross** shared a video demonstrating a full-connectome *Drosophila* brain simulation driving a physical body - the first public demonstration of this kind that I had seen. Seeing that it was possible, and that the underlying tools (FlyWire connectome, Brian2, NeuroMechFly) were all open source, is what prompted me to build an independent implementation.
+
+- EON Systems announcement: [eon.systems/updates/weve-uploaded-a-fruit-fly](https://eon.systems/updates/weve-uploaded-a-fruit-fly)
+- Technical writeup: [eon.systems/updates/embodied-brain-emulation](https://eon.systems/updates/embodied-brain-emulation)
+- Video shared by Dr. Wissner-Gross: [youtube.com/watch?v=e21OUXPlnhk](https://www.youtube.com/watch?v=e21OUXPlnhk)
+
+This project is an independent reimplementation, not affiliated with or endorsed by EON Systems. All code here was written from scratch using the same public datasets and open-source libraries.
+
+### Personal background
 
 I am a software engineer living with Multiple Sclerosis. That combination (a personal stake in understanding demyelinating disease and the technical background to build computational tools) is the direct reason this project exists.
 
